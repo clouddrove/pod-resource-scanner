@@ -10,7 +10,10 @@ keywords:
   - resources
   - scanner
   - cronjob
-home: https://github.com/cloud-wizz/pod-resource-scanner
-sources: []
-maintainers: []
+home: https://github.com/clouddrove/pod-resource-scanner
+sources:
+  - https://github.com/clouddrove/pod-resource-scanner
+maintainers:
+  - name: CloudDrove
+    url: https://clouddrove.com
 kubeVersion: ">=1.21.0"

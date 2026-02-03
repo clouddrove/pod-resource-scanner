@@ -6,7 +6,7 @@ replicaCount: 1
 
 image:
   # -- Image repository and name
-  repository: ghcr.io/cloud-wizz/pod-resource-scanner
+  repository: ghcr.io/clouddrove/pod-resource-scanner
   # -- Image tag (defaults to appVersion)
   tag: ""
   # -- Image pull policy

@@ -1,93 +1,148 @@
-# Pod Resource Scanner
+# Kubernetes Pod Resource Scanner
 
-A Kubernetes-native tool that works on **any cluster** (AKS, GKE, EKS, on-prem). It scans **all namespaces**, **pods**, and **nodes** for CPU, memory, and disk (ephemeral-storage) requests/limits and capacity, then produces **recommendations** for scaling (up/down) and changing limits. Output is **CSV** and optionally a **Google Sheet**, on a weekly schedule.
+[![Build and Push](https://github.com/clouddrove/pod-resource-scanner/actions/workflows/docker-build-push.yaml/badge.svg)](https://github.com/clouddrove/pod-resource-scanner/actions/workflows/docker-build-push.yaml)
 
-**Deployment is via Helm.** The chart is in `chart/`; install with `helm install` and override values in `chart/values.yaml` or with `--set`.
+**Scan Kubernetes cluster resources (CPU, memory, disk) across all namespaces and nodes. Export human-readable CSV and optional Google Sheets with recommendations for scaling and limit tuning.**
 
-## What it collects
+A lightweight, read-only Kubernetes tool that runs as a CronJob on any cluster (AKS, GKE, EKS, on-prem). It collects pod/container requests and limits, node capacity and utilization, and produces a single append-only CSV (and optional Google Sheet) with **human-readable values** and actionable recommendations—ideal for capacity planning, cost visibility, and compliance.
 
-- **Pods/containers**: namespace, pod, container, **node**, workload kind/name, replicas, **CPU / memory / ephemeral-storage** request and limit, status  
-- **Nodes**: per-node **CPU, memory, and disk** (ephemeral-storage) **capacity** and **allocatable**  
-- **Node utilization**: requested CPU/memory/disk per node vs allocatable (percentage)  
-- **Per namespace**: pod count, container count  
-- **Recommendations**: suggest **scale up** (add nodes), **scale down** (remove/consolidate), or **change limits** (set limits, or reduce limit when >> request)  
-- **History**: each run appends timestamped rows for weekly trends  
+---
 
-## Outputs
+## Table of Contents
 
-1. **CSV (always)**  
-   - **`all-resources.csv`** – **single file**: each run **appends** rows with a **`scan_date`** column. One row per container per scan (pod/container details, node capacity/utilization, namespace counts, recommendations). Use this one file for a year or more of history.
+- [Features](#features)
+- [What It Collects](#what-it-collects)
+- [Output](#output)
+- [Quick Start](#quick-start)
+- [Installation (Helm)](#installation-helm)
+- [Configuration](#configuration)
+- [Google Sheet (Optional)](#google-sheet-optional)
+- [Running Locally](#running-locally)
+- [Testing](#testing)
+- [Production Checklist](#production-checklist)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
 
-2. **Google Sheet (optional)**  
-   - **All Resources** – **single sheet**: each run **appends** rows with **`scan_date`** (same columns as the CSV). One place for long-term history.  
+---
 
-## Deploy with Helm
+## Features
 
-The chart is in `chart/`. You need the scanner image (build and push, or use the one from GHCR) and then install/upgrade with Helm.
+- **Cluster-agnostic** — Works on AKS, GKE, EKS, and any Kubernetes (1.21+)
+- **Read-only** — No cluster changes; lists pods, nodes, namespaces, workloads
+- **Single CSV** — One append-only file (`all-resources.csv`) with `scan_date` for long-term history
+- **Human-readable** — Memory/CPU/disk in Mi, Gi, cores, and % (no raw bytes or millicores)
+- **Recommendations** — Suggests scale up/down and limit changes (e.g. limit >> request)
+- **Optional Google Sheet** — Same data appended to one sheet for dashboards and sharing
+- **Helm + CronJob** — Deploy once; runs on a schedule (e.g. weekly)
 
-### 1. Image
+---
 
-Build and push your image, or use the one from GHCR:
+## What It Collects
+
+| Area | Data |
+|------|------|
+| **Pods / Containers** | Namespace, pod, container, node, workload kind/name, replicas, CPU/memory/ephemeral-storage request & limit, status |
+| **Nodes** | Per-node CPU, memory, and disk (ephemeral-storage) capacity and allocatable |
+| **Utilization** | Requested vs allocatable per node (CPU, memory, disk %) |
+| **Namespace** | Pod count and container count per namespace |
+| **Recommendations** | Scale up (add nodes), scale down (consolidate), change limits (set or lower limits) |
+
+---
+
+## Output
+
+- **CSV (always)**  
+  Single file: **`all-resources.csv`**. Each run **appends** rows with a **Scan Date** column. One row per container per scan. Columns use human-readable headers (e.g. "Memory Request", "Node CPU Util %") and values (e.g. "256 Mi", "3.1 cores", "38.9%").
+
+- **Google Sheet (optional)**  
+  One sheet **"All Resources"**: same columns as the CSV, appended each run. Use for dashboards and long-term visibility.
+
+---
+
+## Quick Start
 
 ```bash
-# From repo root (pod-resource-scanner)
-docker build -t ghcr.io/cloud-wizz/pod-resource-scanner:latest .
-docker push ghcr.io/cloud-wizz/pod-resource-scanner:latest
-```
-
-### 2. Install (CSV only)
-
-```bash
+# Add Helm repo (when published) or clone and install from chart
 helm install pod-resource-scanner ./chart \
   --namespace pod-resource-scanner \
   --create-namespace \
   --set fullnameOverride=pod-resource-scanner \
-  --set image.repository=ghcr.io/cloud-wizz/pod-resource-scanner \
+  --set image.repository=ghcr.io/clouddrove/pod-resource-scanner \
   --set image.tag=latest
 ```
-Using `fullnameOverride=pod-resource-scanner` keeps resource names short (e.g. CronJob `pod-resource-scanner`). Omit it to use the default `<release-name>-pod-resource-scanner`.
 
-The CronJob runs **weekly** (default: Sunday 00:00 UTC). To run once manually (with `fullnameOverride=pod-resource-scanner`):
+The CronJob runs weekly by default (Sunday 00:00 UTC). To run once manually:
 
 ```bash
 kubectl create job --from=cronjob/pod-resource-scanner manual-$(date +%s) -n pod-resource-scanner
 kubectl logs -n pod-resource-scanner job/manual-<timestamp> -f
 ```
 
-Without `fullnameOverride`, the CronJob name is `<release-name>-pod-resource-scanner`.
+---
 
-### 3. Override config
+## Installation (Helm)
+
+### 1. Image
+
+Use the pre-built image from [GitHub Container Registry](https://github.com/clouddrove/pod-resource-scanner/pkgs/container/pod-resource-scanner), or build and push your own:
+
+```bash
+docker build -t ghcr.io/clouddrove/pod-resource-scanner:latest .
+docker push ghcr.io/clouddrove/pod-resource-scanner:latest
+```
+
+### 2. Install
+
+```bash
+helm install pod-resource-scanner ./chart \
+  --namespace pod-resource-scanner \
+  --create-namespace \
+  --set fullnameOverride=pod-resource-scanner \
+  --set image.repository=ghcr.io/clouddrove/pod-resource-scanner \
+  --set image.tag=latest
+```
+
+### 3. Override schedule and config
 
 ```bash
 helm upgrade pod-resource-scanner ./chart -n pod-resource-scanner \
   --set config.clusterName=prod-us-east-1 \
-  --set config.retentionDays=90 \
   --set cronjob.schedule="0 9 * * 1"
 ```
 
-See `chart/values.yaml` for all options (image, resources, schedule, config, persistence, googleSheet, etc.).
+See **Configuration** and `chart/values.yaml` for all options.
 
-**Upgrade:** `helm upgrade pod-resource-scanner ./chart -n pod-resource-scanner [--set ...]`  
-**Uninstall:** `helm uninstall pod-resource-scanner -n pod-resource-scanner`  
-**Lint/template:** `helm lint ./chart` and `helm template test ./chart -n pod-resource-scanner`
+**Useful commands**
 
-GitHub Actions (`.github/workflows/`) runs **Helm lint + template** and **Docker build + push** to GHCR on push to `main` (see workflow "Build, Push, and Helm").
+- Upgrade: `helm upgrade pod-resource-scanner ./chart -n pod-resource-scanner [--set ...]`
+- Uninstall: `helm uninstall pod-resource-scanner -n pod-resource-scanner`
+- Lint: `helm lint ./chart`
 
-### 4. Optional: Google Sheet
+---
 
-1. **Google Cloud**  
-   - Create a project (or use existing).  
-   - Enable **Google Sheets API**.  
-   - Create a **Service Account**, download JSON key.  
+## Configuration
 
-2. **Google Sheet**  
-   - Create a new Sheet.  
-   - Share it with the service account email (e.g. `...@....iam.gserviceaccount.com`) as **Editor**.  
-   - Copy the **Sheet ID** from the URL:  
-     `https://docs.google.com/spreadsheets/d/<SHEET_ID>/edit`  
+| Env var / Helm value | Description | Default |
+|----------------------|-------------|--------|
+| `POD_SCANNER_OUTPUT_DIR` | Directory for CSV output | `/output` |
+| `POD_SCANNER_CLUSTER_NAME` | Cluster identifier (for multi-cluster CSV/Sheet) | (empty) |
+| `POD_SCANNER_UPDATE_GOOGLE_SHEET` | Set to `true`/`1` to update Google Sheet | unset |
+| `POD_SCANNER_SHEET_ID` | Google Sheet ID (or use secret) | - |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON | - |
+| `POD_SCANNER_UTIL_SCALE_UP_PCT` | Utilization % above which to recommend scale up | `75` |
+| `POD_SCANNER_UTIL_SCALE_DOWN_PCT` | Utilization % below which to recommend scale down | `25` |
+| `POD_SCANNER_LOG_LEVEL` | Logging level | `INFO` |
 
-3. **Create a Kubernetes Secret**  
-   With `fullnameOverride=pod-resource-scanner`, the chart expects a Secret named `pod-resource-scanner-google`:
+RBAC: the chart creates a **ClusterRole** and **ClusterRoleBinding** (read-only) so the scanner can list nodes, namespaces, pods, and workloads.
+
+---
+
+## Google Sheet (Optional)
+
+1. **Google Cloud** — Enable Google Sheets API; create a Service Account and download JSON key.
+2. **Sheet** — Create a sheet and share it with the service account email as **Editor**. Copy the Sheet ID from the URL: `https://docs.google.com/spreadsheets/d/<SHEET_ID>/edit`.
+3. **Secret** (with `fullnameOverride=pod-resource-scanner`):
 
    ```bash
    kubectl create secret generic pod-resource-scanner-google -n pod-resource-scanner \
@@ -95,124 +150,19 @@ GitHub Actions (`.github/workflows/`) runs **Helm lint + template** and **Docker
      --from-file=credentials.json=/path/to/service-account-key.json
    ```
 
-   Without `fullnameOverride`, the secret name must be `<release-name>-pod-resource-scanner-google`. Or set `googleSheet.existingSecret` to your existing secret name.
-
-4. **Enable Google Sheet in the chart**
+4. **Enable in Helm**
 
    ```bash
-   helm upgrade pod-resource-scanner ./chart -n pod-resource-scanner \
-     --set googleSheet.enabled=true
+   helm upgrade pod-resource-scanner ./chart -n pod-resource-scanner --set googleSheet.enabled=true
    ```
 
-   The job will append to `all-resources.csv` and to the Google Sheet "All Resources" every week.
+The job will append to `all-resources.csv` and to the **All Resources** sheet on each run.
 
-### 5. CSV output
+---
 
-CSV files are written to the PVC. With `fullnameOverride=pod-resource-scanner` the PVC name is `pod-resource-scanner-output`. To copy them out, run a debug pod that mounts the same PVC, or use a sidecar/job that syncs to S3/GCS.
+## Running Locally
 
-## Configuration (Helm)
-
-All configuration is via the Helm chart. Set values in `chart/values.yaml` or with `--set` / `-f`. Scanner env vars are driven by `config.*`, `image.*`, `cronjob.*`, `googleSheet.*`, `persistence`, and `resources`. Key mappings:
-
-| Env var / Helm value | Description | Default |
-|--------|-------------|--------|
-| `POD_SCANNER_OUTPUT_DIR` | Directory for CSV output | `/output` |
-| `POD_SCANNER_CLUSTER_NAME` | Cluster identifier (all CSVs/sheets get a `cluster` column) | (empty) |
-| `POD_SCANNER_UPDATE_GOOGLE_SHEET` | Set to `true`/`1` to update Google Sheet | unset |
-| `POD_SCANNER_SHEET_ID` | Google Sheet ID (or use secret) | - |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON | - |
-| `POD_SCANNER_UTIL_SCALE_UP_PCT` | Utilization % above which to recommend scale up | `75` |
-| `POD_SCANNER_UTIL_SCALE_DOWN_PCT` | Utilization % below which to recommend scale down | `25` |
-| `POD_SCANNER_LOG_LEVEL` | Logging level: DEBUG, INFO, WARNING, ERROR | `INFO` |
-| `POD_SCANNER_RETENTION_DAYS` | Unused; all data is in one append-only CSV (no files are deleted). | `0` |
-
-RBAC: the chart creates a **ClusterRole** and **ClusterRoleBinding** (when `rbac.create: true`) so the scanner can list **nodes**, namespaces, pods, replicasets, deployments, statefulsets, and daemonsets across the cluster (read-only).
-
-## Production checklist
-
-- [ ] **Image**: Use a tagged image and set `image.repository` and `image.tag` (or `imageTag`) in Helm values; avoid `:latest` in prod.
-- [ ] **Cluster name**: Set `config.clusterName` in values so multi-cluster dashboards/sheets can filter by cluster.
-- [ ] **Retention**: All data is in one append-only file; retention is not used. Plan backup/archival if the CSV grows very large.
-
-- [ ] **Resources**: Override `resources` in values (default 128Mi–512Mi, 50m–500m CPU). Increase for very large clusters if needed.
-- [ ] **Timeout**: Override `cronjob.activeDeadlineSeconds` (default 900). Increase if scans regularly run longer.
-- [ ] **Monitoring**: Alert on CronJob job failure (e.g. Prometheus `kube_job_failed` or check `last_success.txt` age – see Runbook).
-- [ ] **Secrets**: For Google Sheet, use a dedicated service account with minimal scope (Sheets + Drive). Rotate keys periodically.
-- [ ] **Security**: Chart sets `podSecurityContext` (runAsNonRoot, runAsUser 1000, fsGroup 1000); image runs as non-root.
-
-## Runbook: Job failed or no recent data
-
-1. **List recent jobs and see if the last one failed**
-   ```bash
-   kubectl get jobs -n pod-resource-scanner --sort-by=.metadata.creationTimestamp
-   kubectl describe job -n pod-resource-scanner <job-name>
-   ```
-
-2. **Fetch logs from the failed job’s pod**
-   ```bash
-   kubectl logs -n pod-resource-scanner job/<job-name> --tail=200
-   ```
-
-3. **Check last success marker**  
-   The scanner writes `last_success.txt` to the output directory with `timestamp=` and `cluster=`. You can expose this via a sidecar or periodic job that copies it to a place Prometheus/node_exporter can scrape (e.g. textfile collector), or mount the PVC in a pod that checks file age and alerts if older than 7 days.
-
-4. **Common failures**
-   - **Permission denied on /output**: Ensure chart `podSecurityContext` has `fsGroup: 1000` and image runs as UID 1000 (default).
-   - **Google Sheet 403 / 404**: Verify the Sheet is shared with the service account email and Sheet ID is correct.
-   - **Kubernetes API timeout / connection refused**: Cluster may be overloaded or network policy blocking; increase `cronjob.activeDeadlineSeconds` in values or retry later.
-   - **Out of memory**: Increase `resources.limits.memory` in Helm values for very large clusters.
-
-5. **Run a one-off job to test**
-   ```bash
-   kubectl create job --from=cronjob/<release-name>-pod-resource-scanner manual-test -n pod-resource-scanner
-   kubectl logs -n pod-resource-scanner job/manual-test -f
-   ```
-   Or install with `oneShotJob.install: true` in values to create a one-off Job resource (then run it manually).
-
-## Schedule
-
-Default: `0 0 * * 0` (every Sunday at 00:00 UTC). Override with `cronjob.schedule` (e.g. `--set cronjob.schedule="0 9 * * 1"` for Monday 09:00 UTC).
-
-## Tests
-
-Run unit tests (no Kubernetes cluster or deps required for quantity parsing tests):
-
-```bash
-pip install -r requirements.txt   # optional for quantity tests only
-python3 -m pytest tests/ -v
-```
-
-## Test with Docker only
-
-No Kubernetes deploy: build the image and run the scanner in a container using your local kubeconfig. Requires Docker and a working `kubeconfig` (e.g. `~/.kube/config`).
-
-```bash
-cd pod-resource-scanner
-./scripts/docker-test.sh
-```
-
-This will:
-
-1. Build the image `pod-resource-scanner:latest`
-2. Run the scanner with your `KUBECONFIG` (default `~/.kube/config`) mounted read-only
-3. Write CSVs and `last_success.txt` to `./output` (override with `POD_SCANNER_OUTPUT=/path/to/dir`)
-
-Optional env vars for the run:
-
-- `POD_SCANNER_OUTPUT` – output directory on the host (default: `./output`)
-- `POD_SCANNER_CLUSTER_NAME` – cluster label in CSVs (default: `docker-test`)
-- `KUBECONFIG` – path to kubeconfig (default: `~/.kube/config`)
-- `POD_SCANNER_IMAGE` – image name to build/run (default: `pod-resource-scanner:latest`)
-
-Example with custom cluster name and output:
-
-```bash
-POD_SCANNER_CLUSTER_NAME=my-aks ./scripts/docker-test.sh
-```
-
-## Local run (outside cluster)
-
-Install deps and run with your kubeconfig:
+Without deploying to a cluster:
 
 ```bash
 pip install -r requirements.txt
@@ -220,4 +170,71 @@ export POD_SCANNER_OUTPUT_DIR=./output
 python scanner.py
 ```
 
-Output appears under `./output/` (or `POD_SCANNER_OUTPUT_DIR`). For Google Sheet, set `GOOGLE_APPLICATION_CREDENTIALS` and `POD_SCANNER_SHEET_ID` and `POD_SCANNER_UPDATE_GOOGLE_SHEET=true`. A successful run also creates `last_success.txt` with the scan timestamp and cluster name for monitoring.
+Output goes to `./output/all-resources.csv`. For Google Sheet, set `GOOGLE_APPLICATION_CREDENTIALS`, `POD_SCANNER_SHEET_ID`, and `POD_SCANNER_UPDATE_GOOGLE_SHEET=true`.
+
+**Docker (local kubeconfig)**
+
+```bash
+./scripts/docker-test.sh
+```
+
+Builds the image and runs the scanner with `KUBECONFIG` mounted; CSV under `./output` by default.
+
+---
+
+## Testing
+
+```bash
+pip install -r requirements.txt
+python3 -m pytest tests/ -v
+```
+
+No cluster required for the quantity and formatting tests.
+
+---
+
+## Production Checklist
+
+- [ ] Use a tagged image (e.g. `image.tag=0.1.0`); avoid `:latest` in production.
+- [ ] Set `config.clusterName` for multi-cluster visibility.
+- [ ] Override `resources` and `cronjob.activeDeadlineSeconds` for large clusters.
+- [ ] Monitor CronJob failure (e.g. Prometheus or `last_success.txt` age).
+- [ ] For Google Sheet: use a dedicated service account; rotate keys periodically.
+
+---
+
+## Troubleshooting
+
+| Issue | What to do |
+|-------|------------|
+| **Permission denied on /output** | Ensure `podSecurityContext.fsGroup: 1000` and image runs as UID 1000. |
+| **Google Sheet 403 / 404** | Share the sheet with the service account email; check Sheet ID. |
+| **API timeout / connection refused** | Increase `cronjob.activeDeadlineSeconds` or retry; check network policies. |
+| **Out of memory** | Increase `resources.limits.memory` in Helm values. |
+
+**Logs and one-off run**
+
+```bash
+kubectl get jobs -n pod-resource-scanner --sort-by=.metadata.creationTimestamp
+kubectl logs -n pod-resource-scanner job/<job-name> --tail=200
+kubectl create job --from=cronjob/pod-resource-scanner manual-test -n pod-resource-scanner
+kubectl logs -n pod-resource-scanner job/manual-test -f
+```
+
+The scanner writes `last_success.txt` in the output directory (`timestamp=`, `cluster=`) for monitoring.
+
+---
+
+## Contributing
+
+Contributions are welcome. Please open an issue or pull request on [GitHub](https://github.com/clouddrove/pod-resource-scanner).
+
+---
+
+## License
+
+See [LICENSE](LICENSE) in this repository.
+
+---
+
+**Repository:** [github.com/clouddrove/pod-resource-scanner](https://github.com/clouddrove/pod-resource-scanner) · **Maintained by [CloudDrove](https://clouddrove.com)**
