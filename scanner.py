@@ -331,6 +331,53 @@ POD_HEADERS = [
     "ephemeral_storage_request", "ephemeral_storage_limit", "status",
 ]
 
+# Columns added per row from node utilization and namespace summary (single combined CSV)
+NODE_UTIL_COLUMNS = [
+    "node_cpu_capacity", "node_cpu_allocatable", "node_memory_capacity", "node_memory_allocatable",
+    "node_ephemeral_storage_capacity", "node_ephemeral_storage_allocatable",
+    "node_cpu_requested_millicores", "node_memory_requested_bytes", "node_ephemeral_storage_requested_bytes",
+    "node_cpu_util_pct", "node_memory_util_pct", "node_disk_util_pct",
+]
+NS_SUMMARY_COLUMNS = ["ns_pod_count", "ns_container_count"]
+COMBINED_HEADERS = POD_HEADERS + NODE_UTIL_COLUMNS + NS_SUMMARY_COLUMNS + ["recommendations"]
+
+
+def _build_combined_rows(
+    rows: List[dict],
+    summary: List[dict],
+    node_util: List[dict],
+    recommendations: List[dict],
+) -> List[dict]:
+    """Merge pod rows with node utilization, namespace summary, and recommendations into one row per container."""
+    node_by_key = {(r["cluster"], r["node"]): r for r in node_util}
+    summary_by_key = {(s["cluster"], s["namespace"]): s for s in summary}
+    recs_by_target: Dict[str, List[str]] = {}
+    for rec in recommendations:
+        target = rec.get("target") or ""
+        if not target.startswith("node:") and target != "cluster":
+            part = f"{rec.get('type', '')}: {rec.get('reason', '')} | {rec.get('action', '')}"
+            recs_by_target.setdefault(target, []).append(part)
+    combined = []
+    for r in rows:
+        row = dict(r)
+        key = (r.get("cluster"), r.get("node"))
+        nu = node_by_key.get(key, {})
+        for col in (
+            "cpu_capacity", "cpu_allocatable", "memory_capacity", "memory_allocatable",
+            "ephemeral_storage_capacity", "ephemeral_storage_allocatable",
+            "cpu_requested_millicores", "memory_requested_bytes", "ephemeral_storage_requested_bytes",
+            "cpu_util_pct", "memory_util_pct", "disk_util_pct",
+        ):
+            row["node_" + col] = nu.get(col, "")
+        ns_key = (r.get("cluster"), r.get("namespace"))
+        s = summary_by_key.get(ns_key, {})
+        row["ns_pod_count"] = s.get("pod_count", "")
+        row["ns_container_count"] = s.get("container_count", "")
+        target = f"{r.get('namespace', '')}/{r.get('pod', '')}/{r.get('container', '')}"
+        row["recommendations"] = "; ".join(recs_by_target.get(target, []))
+        combined.append(row)
+    return combined
+
 
 def write_csv(
     rows: List[dict],
@@ -341,49 +388,15 @@ def write_csv(
     output_dir: Path,
     run_ts: str,
 ):
-    """Write pod, namespace, node, node-utilization, and recommendations CSVs."""
+    """Write a single combined CSV with pod, node, namespace, and recommendation data."""
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    pod_file = output_dir / f"pod-resources-{run_ts}.csv"
-    with open(pod_file, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=POD_HEADERS, extrasaction="ignore")
+    combined = _build_combined_rows(rows, summary, node_util, recommendations)
+    out_file = output_dir / f"all-resources-{run_ts}.csv"
+    with open(out_file, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=COMBINED_HEADERS, extrasaction="ignore")
         w.writeheader()
-        w.writerows(rows)
-    LOG.info("Wrote %s (%s rows)", pod_file, len(rows))
-
-    summary_headers = ["cluster", "namespace", "pod_count", "container_count"]
-    summary_file = output_dir / f"namespace-summary-{run_ts}.csv"
-    with open(summary_file, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=summary_headers, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(summary)
-    LOG.info("Wrote %s (%s namespaces)", summary_file, len(summary))
-
-    node_headers = ["cluster", "node", "cpu_capacity", "cpu_allocatable", "memory_capacity", "memory_allocatable",
-                    "ephemeral_storage_capacity", "ephemeral_storage_allocatable"]
-    node_file = output_dir / f"nodes-{run_ts}.csv"
-    with open(node_file, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=node_headers, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(node_rows)
-    LOG.info("Wrote %s (%s nodes)", node_file, len(node_rows))
-
-    util_headers = node_headers + ["cpu_requested_millicores", "memory_requested_bytes",
-                                  "ephemeral_storage_requested_bytes", "cpu_util_pct", "memory_util_pct", "disk_util_pct"]
-    util_file = output_dir / f"node-utilization-{run_ts}.csv"
-    with open(util_file, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=util_headers, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(node_util)
-    LOG.info("Wrote %s (%s nodes)", util_file, len(node_util))
-
-    rec_headers = ["cluster", "type", "target", "reason", "action"]
-    rec_file = output_dir / f"recommendations-{run_ts}.csv"
-    with open(rec_file, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=rec_headers, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(recommendations)
-    LOG.info("Wrote %s (%s recommendations)", rec_file, len(recommendations))
+        w.writerows(combined)
+    LOG.info("Wrote %s (%s rows)", out_file, len(combined))
 
 
 def append_csv_with_timestamp(rows: List[dict], output_dir: Path, run_ts: str) -> None:
@@ -409,7 +422,7 @@ def update_google_sheet(
     recommendations: List[dict],
     run_ts: str,
 ):
-    """Update Google Sheet with current snapshot, nodes, utilization, recommendations, and history."""
+    """Update Google Sheet with one combined sheet (all data) and optional History append."""
     import gspread
     from google.oauth2.service_account import Credentials
 
@@ -427,53 +440,18 @@ def update_google_sheet(
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(sheet_key.strip())
 
-    # Sheet 1: current pod snapshot
+    # Single sheet: all data (pod + node + namespace + recommendations), same as all-resources-*.csv
+    combined = _build_combined_rows(rows, summary, node_util, recommendations)
     try:
-        ws_current = sh.worksheet("Current")
+        ws_all = sh.worksheet("All Resources")
     except gspread.WorksheetNotFound:
-        ws_current = sh.add_worksheet("Current", rows=1, cols=len(POD_HEADERS))
-    ws_current.clear()
-    all_cells = [["Last updated: " + run_ts]] + [POD_HEADERS] + [[r.get(h, "") for h in POD_HEADERS] for r in rows]
-    ws_current.update("A1", all_cells, value_input_option="RAW")
-    LOG.info("Updated sheet 'Current' with pod resources")
+        ws_all = sh.add_worksheet("All Resources", rows=1, cols=len(COMBINED_HEADERS))
+    ws_all.clear()
+    all_cells = [["Last updated: " + run_ts]] + [COMBINED_HEADERS] + [[r.get(h, "") for h in COMBINED_HEADERS] for r in combined]
+    ws_all.update("A1", all_cells, value_input_option="RAW")
+    LOG.info("Updated sheet 'All Resources' (%s rows)", len(combined))
 
-    # Sheet 2: namespace summary
-    try:
-        ws_summary = sh.worksheet("Namespace Summary")
-    except gspread.WorksheetNotFound:
-        ws_summary = sh.add_worksheet("Namespace Summary", rows=1, cols=5)
-    summary_headers = ["cluster", "namespace", "pod_count", "container_count", "scan_date"]
-    summary_rows = [{**s, "scan_date": run_ts} for s in summary]
-    ws_summary.clear()
-    ws_summary.update(
-        [summary_headers] + [[r.get(h, "") for h in summary_headers] for r in summary_rows],
-        value_input_option="RAW",
-    )
-    LOG.info("Updated sheet 'Namespace Summary'")
-
-    # Sheet 3: node utilization (CPU, memory, disk requested vs allocatable, utilization %)
-    util_headers = ["cluster", "node", "cpu_allocatable", "memory_allocatable", "ephemeral_storage_allocatable",
-                    "cpu_requested_millicores", "memory_requested_bytes", "ephemeral_storage_requested_bytes",
-                    "cpu_util_pct", "memory_util_pct", "disk_util_pct"]
-    try:
-        ws_nodes = sh.worksheet("Node Utilization")
-    except gspread.WorksheetNotFound:
-        ws_nodes = sh.add_worksheet("Node Utilization", rows=1, cols=len(util_headers))
-    ws_nodes.clear()
-    ws_nodes.update("A1", [["Last updated: " + run_ts]] + [util_headers] + [[nu.get(h, "") for h in util_headers] for nu in node_util], value_input_option="RAW")
-    LOG.info("Updated sheet 'Node Utilization'")
-
-    # Sheet 4: recommendations (scale up/down, change limits)
-    rec_headers = ["cluster", "type", "target", "reason", "action"]
-    try:
-        ws_rec = sh.worksheet("Recommendations")
-    except gspread.WorksheetNotFound:
-        ws_rec = sh.add_worksheet("Recommendations", rows=1, cols=len(rec_headers))
-    ws_rec.clear()
-    ws_rec.update("A1", [["Last updated: " + run_ts]] + [rec_headers] + [[r.get(h, "") for h in rec_headers] for r in recommendations], value_input_option="RAW")
-    LOG.info("Updated sheet 'Recommendations'")
-
-    # Sheet 5: history (append weekly rows)
+    # History: append weekly rows for trend
     history_headers = ["scan_date"] + POD_HEADERS
     new_rows = [[run_ts] + [r.get(h, "") for h in POD_HEADERS] for r in rows]
     try:
@@ -523,8 +501,7 @@ def cleanup_old_snapshots(output_dir: Path, keep_days: int) -> None:
     import time
     cutoff = time.time() - (keep_days * 86400)
     removed = 0
-    for pattern in ("pod-resources-*.csv", "namespace-summary-*.csv", "nodes-*.csv",
-                   "node-utilization-*.csv", "recommendations-*.csv"):
+    for pattern in ("all-resources-*.csv",):
         for f in output_dir.glob(pattern):
             try:
                 if f.stat().st_mtime < cutoff:

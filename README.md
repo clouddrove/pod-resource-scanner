@@ -16,19 +16,12 @@ A Kubernetes-native tool that works on **any cluster** (AKS, GKE, EKS, on-prem).
 ## Outputs
 
 1. **CSV (always)**  
-   - `pod-resources-<timestamp>.csv` – pod/container details (incl. node, ephemeral_storage)  
-   - `namespace-summary-<timestamp>.csv` – per-namespace counts  
-   - `nodes-<timestamp>.csv` – node CPU/memory/disk capacity and allocatable  
-   - `node-utilization-<timestamp>.csv` – requested vs allocatable and utilization % per node  
-   - `recommendations-<timestamp>.csv` – scale up/down and change-limits suggestions  
+   - `all-resources-<timestamp>.csv` – **single combined CSV**: one row per container with pod/container details, node capacity/allocatable/utilization, namespace pod/container counts, and recommendations for that container  
    - `pod-resources-history.csv` – appended each run with `scan_date`  
 
 2. **Google Sheet (optional)**  
-   - **Current** – latest pod/container snapshot  
-   - **Namespace Summary** – namespace counts  
-   - **Node Utilization** – node CPU/memory/disk requested vs allocatable and %  
-   - **Recommendations** – scale up/down and change limits  
-   - **History** – appended rows each week  
+   - **All Resources** – single sheet with one row per container: pod/container details, node capacity/utilization, namespace counts, and recommendations (same layout as `all-resources-*.csv`)  
+   - **History** – appended rows each week for trend  
 
 ## Deploy with Helm
 
@@ -113,7 +106,7 @@ GitHub Actions (`.github/workflows/`) runs **Helm lint + template** and **Docker
      --set googleSheet.enabled=true
    ```
 
-   The job will write CSV to the PVC and update all sheets (Current, Namespace Summary, Node Utilization, Recommendations, History) every week.
+   The job will write CSV to the PVC and update the Google Sheet (All Resources + History append) every week.
 
 ### 5. CSV output
 
@@ -133,7 +126,7 @@ All configuration is via the Helm chart. Set values in `chart/values.yaml` or wi
 | `POD_SCANNER_UTIL_SCALE_UP_PCT` | Utilization % above which to recommend scale up | `75` |
 | `POD_SCANNER_UTIL_SCALE_DOWN_PCT` | Utilization % below which to recommend scale down | `25` |
 | `POD_SCANNER_LOG_LEVEL` | Logging level: DEBUG, INFO, WARNING, ERROR | `INFO` |
-| `POD_SCANNER_RETENTION_DAYS` | Delete snapshot CSVs older than N days (0 = keep all). History CSV is never deleted. | `0` |
+| `POD_SCANNER_RETENTION_DAYS` | Delete `all-resources-*.csv` snapshots older than N days (0 = keep all). History CSV is never deleted. | `0` |
 
 RBAC: the chart creates a **ClusterRole** and **ClusterRoleBinding** (when `rbac.create: true`) so the scanner can list **nodes**, namespaces, pods, replicasets, deployments, statefulsets, and daemonsets across the cluster (read-only).
 
@@ -141,7 +134,7 @@ RBAC: the chart creates a **ClusterRole** and **ClusterRoleBinding** (when `rbac
 
 - [ ] **Image**: Use a tagged image and set `image.repository` and `image.tag` (or `imageTag`) in Helm values; avoid `:latest` in prod.
 - [ ] **Cluster name**: Set `config.clusterName` in values so multi-cluster dashboards/sheets can filter by cluster.
-- [ ] **Retention**: Set `config.retentionDays` (e.g. `90`) so snapshot CSVs don’t fill the PVC; history CSV is kept.
+- [ ] **Retention**: Set `config.retentionDays` (e.g. `90`) so all-resources-*.csv snapshots don’t fill the PVC; history CSV is kept.
 - [ ] **Resources**: Override `resources` in values (default 128Mi–512Mi, 50m–500m CPU). Increase for very large clusters if needed.
 - [ ] **Timeout**: Override `cronjob.activeDeadlineSeconds` (default 900). Increase if scans regularly run longer.
 - [ ] **Monitoring**: Alert on CronJob job failure (e.g. Prometheus `kube_job_failed` or check `last_success.txt` age – see Runbook).
