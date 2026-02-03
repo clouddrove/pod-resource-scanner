@@ -1,0 +1,10 @@
+# Patterns to ignore when building packages.
+.git
+.gitignore
+*.md
+*.py
+scripts/
+tests/
+Dockerfile
+requirements.txt
+.github/

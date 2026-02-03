@@ -1,0 +1,15 @@
+1. Pod Resource Scanner has been installed.
+
+2. CronJob runs on schedule: {{ .Values.cronjob.schedule }}
+   - To run once manually: kubectl create job --from=cronjob/{{ include "pod-resource-scanner.fullname" . }} manual-$(date +%s) -n {{ .Release.Namespace }}
+
+3. CSV output is stored on the PVC: {{ include "pod-resource-scanner.pvcName" . }}
+   - To copy files out, run a debug pod that mounts the same PVC.
+
+4. Optional Google Sheet: set googleSheet.enabled=true and create a Secret with sheet-id and credentials.json:
+   kubectl create secret generic {{ include "pod-resource-scanner.fullname" . }}-google -n {{ .Release.Namespace }} \
+     --from-literal=sheet-id="YOUR_SHEET_ID" \
+     --from-file=credentials.json=/path/to/service-account-key.json
+
+5. Check logs from the last run:
+   kubectl logs -n {{ .Release.Namespace }} job/$(kubectl get jobs -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "pod-resource-scanner.name" . }} --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}') --tail=50

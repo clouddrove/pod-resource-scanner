@@ -1,0 +1,94 @@
+{{- if .Values.cronjob.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "pod-resource-scanner.fullname" . }}
+  labels:
+    {{- include "pod-resource-scanner.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronjob.schedule | quote }}
+  concurrencyPolicy: {{ .Values.cronjob.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.cronjob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.cronjob.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.cronjob.backoffLimit }}
+      ttlSecondsAfterFinished: {{ .Values.cronjob.ttlSecondsAfterFinished }}
+      activeDeadlineSeconds: {{ .Values.cronjob.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "pod-resource-scanner.selectorLabels" . | nindent 12 }}
+        spec:
+          {{- with .Values.podSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          serviceAccountName: {{ include "pod-resource-scanner.serviceAccountName" . }}
+          restartPolicy: OnFailure
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: scanner
+              image: {{ include "pod-resource-scanner.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              envFrom:
+                - configMapRef:
+                    name: {{ include "pod-resource-scanner.configMapName" . }}
+              {{- if .Values.googleSheet.enabled }}
+              env:
+                - name: POD_SCANNER_UPDATE_GOOGLE_SHEET
+                  value: "true"
+                - name: GOOGLE_APPLICATION_CREDENTIALS
+                  value: "/etc/google-sa/{{ .Values.googleSheet.credentialsKey }}"
+                - name: POD_SCANNER_SHEET_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.googleSheet.existingSecret | default (printf "%s-google" (include "pod-resource-scanner.fullname" .)) }}
+                      key: {{ .Values.googleSheet.sheetIdKey }}
+              {{- end }}
+              {{- with .Values.securityContext }}
+              securityContext:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+              volumeMounts:
+                - name: output
+                  mountPath: {{ .Values.config.outputDir }}
+                {{- if .Values.googleSheet.enabled }}
+                - name: google-sa
+                  mountPath: /etc/google-sa
+                  readOnly: true
+                {{- end }}
+          volumes:
+            - name: output
+              {{- if .Values.persistence.enabled }}
+              persistentVolumeClaim:
+                claimName: {{ include "pod-resource-scanner.pvcName" . }}
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+            {{- if .Values.googleSheet.enabled }}
+            - name: google-sa
+              secret:
+                secretName: {{ .Values.googleSheet.existingSecret | default (printf "%s-google" (include "pod-resource-scanner.fullname" .)) }}
+                items:
+                  - key: {{ .Values.googleSheet.credentialsKey }}
+                    path: {{ .Values.googleSheet.credentialsKey }}
+            {{- end }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

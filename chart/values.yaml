@@ -1,0 +1,124 @@
+# Default values for pod-resource-scanner.
+# This is a YAML-formatted file. Declare variables to be passed into your templates.
+
+# -- Number of replicas (not used for CronJob; kept for chart structure)
+replicaCount: 1
+
+image:
+  # -- Image repository and name
+  repository: ghcr.io/cloud-wizz/pod-resource-scanner
+  # -- Image tag (defaults to appVersion)
+  tag: ""
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+
+# -- Override the default image tag (defaults to Chart appVersion)
+imageTag: ""
+
+# -- Additional image pull secrets
+imagePullSecrets: []
+
+# -- Name override for all resources (defaults to release name)
+nameOverride: ""
+# -- Full name override (defaults to release name + chart name)
+fullnameOverride: ""
+
+# -- Service account for the scanner (created if not existing)
+serviceAccount:
+  create: true
+  # -- Annotations for the ServiceAccount
+  annotations: {}
+  # -- Use existing ServiceAccount by name (ignored if serviceAccount.create is true)
+  name: ""
+
+# -- RBAC: create ClusterRole and ClusterRoleBinding for listing nodes, pods, workloads
+rbac:
+  create: true
+
+# -- Pod security context (non-root, UID 1000 for volume writes)
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+# -- Container security context
+securityContext: {}
+
+# -- CronJob configuration
+cronjob:
+  # -- Enable the CronJob (set false to only install RBAC/ConfigMap/PVC for manual runs)
+  enabled: true
+  # -- Schedule (default: every Sunday 00:00 UTC)
+  schedule: "0 0 * * 0"
+  # -- Concurrency policy
+  concurrencyPolicy: Forbid
+  # -- Successful jobs history limit
+  successfulJobsHistoryLimit: 3
+  # -- Failed jobs history limit
+  failedJobsHistoryLimit: 3
+  # -- Job backoff limit
+  backoffLimit: 2
+  # -- TTL for finished jobs (seconds)
+  ttlSecondsAfterFinished: 86400
+  # -- Active deadline for each run (seconds). Job is killed if it runs longer.
+  activeDeadlineSeconds: 900
+
+# -- Scanner configuration (env vars)
+config:
+  # -- Output directory inside the container (must match volume mount)
+  outputDir: "/output"
+  # -- Cluster identifier for multi-cluster CSV/Google Sheet
+  clusterName: ""
+  # -- Log level (DEBUG, INFO, WARNING, ERROR)
+  logLevel: "INFO"
+  # -- Utilization % above which to recommend scale up
+  utilScaleUpPct: "75"
+  # -- Utilization % below which to recommend scale down
+  utilScaleDownPct: "25"
+  # -- Delete snapshot CSVs older than N days (0 = keep all). History CSV is never deleted.
+  retentionDays: "0"
+
+# -- Google Sheet integration (optional)
+googleSheet:
+  enabled: false
+  # -- Use an existing Secret for sheet-id and credentials.json (if set, secret is not created)
+  existingSecret: ""
+  # -- Secret key for Google Sheet ID (used when existingSecret is set)
+  sheetIdKey: sheet-id
+  # -- Secret key for service account JSON (used when existingSecret is set)
+  credentialsKey: credentials.json
+
+# -- Persistent volume for CSV output
+persistence:
+  enabled: true
+  # -- PVC storage class (empty = default)
+  storageClass: ""
+  # -- Requested storage size
+  size: 1Gi
+  # -- PVC access mode
+  accessMode: ReadWriteOnce
+
+# -- Resource requests and limits for the scanner container
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "50m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+# -- Node selector for the CronJob/Job pods
+nodeSelector: {}
+
+# -- Tolerations for the CronJob/Job pods
+tolerations: []
+
+# -- Affinity for the CronJob/Job pods
+affinity: {}
+
+# -- Install a one-off Job template (for manual testing). Use: helm template ... -s templates/job-one-shot.yaml | kubectl apply -f -
+oneShotJob:
+  # -- Create the one-shot Job by default (set true to include in helm install)
+  install: false
+  # -- TTL for the one-shot Job after it finishes (seconds)
+  ttlSecondsAfterFinished: 3600

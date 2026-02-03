@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "pod-resource-scanner.configMapName" . }}
+  labels:
+    {{- include "pod-resource-scanner.labels" . | nindent 4 }}
+data:
+  POD_SCANNER_OUTPUT_DIR: {{ .Values.config.outputDir | quote }}
+  POD_SCANNER_CLUSTER_NAME: {{ .Values.config.clusterName | quote }}
+  POD_SCANNER_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  POD_SCANNER_UTIL_SCALE_UP_PCT: {{ .Values.config.utilScaleUpPct | quote }}
+  POD_SCANNER_UTIL_SCALE_DOWN_PCT: {{ .Values.config.utilScaleDownPct | quote }}
+  POD_SCANNER_RETENTION_DAYS: {{ .Values.config.retentionDays | quote }}

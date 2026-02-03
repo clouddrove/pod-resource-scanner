@@ -1,0 +1,16 @@
+apiVersion: v2
+name: pod-resource-scanner
+description: Scans Kubernetes namespaces, pods, and nodes for CPU/memory/disk requests and limits; exports CSV and optionally updates a Google Sheet. Runs as a weekly CronJob.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - kubernetes
+  - monitoring
+  - resources
+  - scanner
+  - cronjob
+home: https://github.com/cloud-wizz/pod-resource-scanner
+sources: []
+maintainers: []
+kubeVersion: ">=1.21.0"
