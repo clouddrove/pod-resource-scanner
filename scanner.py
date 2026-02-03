@@ -340,6 +340,9 @@ NODE_UTIL_COLUMNS = [
 ]
 NS_SUMMARY_COLUMNS = ["ns_pod_count", "ns_container_count"]
 COMBINED_HEADERS = POD_HEADERS + NODE_UTIL_COLUMNS + NS_SUMMARY_COLUMNS + ["recommendations"]
+# Single cumulative file: scan_date first so history is in one place
+HISTORY_CSV_HEADERS = ["scan_date"] + COMBINED_HEADERS
+OUTPUT_CSV_NAME = "all-resources.csv"
 
 
 def _build_combined_rows(
@@ -387,32 +390,20 @@ def write_csv(
     recommendations: List[dict],
     output_dir: Path,
     run_ts: str,
-):
-    """Write a single combined CSV with pod, node, namespace, and recommendation data."""
+) -> None:
+    """Append combined data (with scan_date) to the single cumulative CSV for year-long history."""
     output_dir.mkdir(parents=True, exist_ok=True)
     combined = _build_combined_rows(rows, summary, node_util, recommendations)
-    out_file = output_dir / f"all-resources-{run_ts}.csv"
-    with open(out_file, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=COMBINED_HEADERS, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(combined)
-    LOG.info("Wrote %s (%s rows)", out_file, len(combined))
-
-
-def append_csv_with_timestamp(rows: List[dict], output_dir: Path, run_ts: str) -> None:
-    """Append pod-level data with a timestamp column for weekly history."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "pod-resources-history.csv"
-    headers = ["scan_date"] + POD_HEADERS
-    for r in rows:
+    for r in combined:
         r["scan_date"] = run_ts
+    path = output_dir / OUTPUT_CSV_NAME
     file_exists = path.exists()
     with open(path, "a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=headers, extrasaction="ignore")
+        w = csv.DictWriter(f, fieldnames=HISTORY_CSV_HEADERS, extrasaction="ignore")
         if not file_exists:
             w.writeheader()
-        w.writerows(rows)
-    LOG.info("Appended %s rows to %s", len(rows), path)
+        w.writerows(combined)
+    LOG.info("Appended %s rows to %s (scan_date=%s)", len(combined), path, run_ts)
 
 
 def update_google_sheet(
@@ -440,28 +431,19 @@ def update_google_sheet(
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(sheet_key.strip())
 
-    # Single sheet: all data (pod + node + namespace + recommendations), same as all-resources-*.csv
+    # Single sheet: append combined rows with scan_date (same layout as all-resources.csv, year-long history)
     combined = _build_combined_rows(rows, summary, node_util, recommendations)
+    for r in combined:
+        r["scan_date"] = run_ts
     try:
         ws_all = sh.worksheet("All Resources")
     except gspread.WorksheetNotFound:
-        ws_all = sh.add_worksheet("All Resources", rows=1, cols=len(COMBINED_HEADERS))
-    ws_all.clear()
-    all_cells = [["Last updated: " + run_ts]] + [COMBINED_HEADERS] + [[r.get(h, "") for h in COMBINED_HEADERS] for r in combined]
-    ws_all.update("A1", all_cells, value_input_option="RAW")
-    LOG.info("Updated sheet 'All Resources' (%s rows)", len(combined))
-
-    # History: append weekly rows for trend
-    history_headers = ["scan_date"] + POD_HEADERS
-    new_rows = [[run_ts] + [r.get(h, "") for h in POD_HEADERS] for r in rows]
-    try:
-        ws_history = sh.worksheet("History")
-    except gspread.WorksheetNotFound:
-        ws_history = sh.add_worksheet("History", rows=1, cols=len(history_headers))
-        ws_history.update("A1", [history_headers], value_input_option="RAW")
+        ws_all = sh.add_worksheet("All Resources", rows=1, cols=len(HISTORY_CSV_HEADERS))
+        ws_all.update("A1", [HISTORY_CSV_HEADERS], value_input_option="RAW")
+    new_rows = [[r.get(h, "") for h in HISTORY_CSV_HEADERS] for r in combined]
     if new_rows:
-        ws_history.append_rows(new_rows, value_input_option="RAW")
-    LOG.info("Appended to sheet 'History' for weekly trend")
+        ws_all.append_rows(new_rows, value_input_option="RAW")
+    LOG.info("Appended %s rows to sheet 'All Resources' (scan_date=%s)", len(new_rows), run_ts)
 
 
 def validate_config(output_dir: Path, update_sheet: bool) -> None:
@@ -495,22 +477,7 @@ def write_last_success(output_dir: Path, run_ts: str, cluster: str) -> None:
 
 
 def cleanup_old_snapshots(output_dir: Path, keep_days: int) -> None:
-    """Remove snapshot CSVs older than keep_days to avoid filling PVC."""
-    if keep_days <= 0:
-        return
-    import time
-    cutoff = time.time() - (keep_days * 86400)
-    removed = 0
-    for pattern in ("all-resources-*.csv",):
-        for f in output_dir.glob(pattern):
-            try:
-                if f.stat().st_mtime < cutoff:
-                    f.unlink()
-                    removed += 1
-            except OSError as e:
-                LOG.warning("Could not remove %s: %s", f, e)
-    if removed:
-        LOG.info("Cleaned up %s old snapshot file(s)", removed)
+    """No-op: all data is in a single append-only CSV (all-resources.csv); we do not delete history."""
 
 
 def inject_cluster(cluster_name: str, rows: List[dict], summary: List[dict],
@@ -562,7 +529,6 @@ def main() -> None:
         inject_cluster(cluster_name, rows, summary, node_rows, node_util, recommendations)
 
         write_csv(rows, summary, node_rows, node_util, recommendations, output_dir, run_ts)
-        append_csv_with_timestamp(rows, output_dir, run_ts)
         write_last_success(output_dir, run_ts, cluster_name or "default")
         cleanup_old_snapshots(output_dir, retention_days)
 
