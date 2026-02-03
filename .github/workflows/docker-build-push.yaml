@@ -4,8 +4,8 @@ name: Build, Push, and Helm
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
+    branches: [main]   # build image only on push to main
+  workflow_dispatch:   # allow manual run (image built only when run from main)
 
 env:
   REGISTRY: ghcr.io
@@ -32,6 +32,7 @@ jobs:
 
   build-push:
     name: Build and push Docker image
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
