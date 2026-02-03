@@ -19,7 +19,13 @@ from typing import List, Dict, Any, Optional
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
-from quantity import parse_quantity, quantity_to_millicores, quantity_to_bytes
+from quantity import (
+    parse_quantity,
+    quantity_to_millicores,
+    quantity_to_bytes,
+    format_bytes,
+    format_millicores,
+)
 
 LOG = logging.getLogger("scanner")
 
@@ -344,6 +350,114 @@ COMBINED_HEADERS = POD_HEADERS + NODE_UTIL_COLUMNS + NS_SUMMARY_COLUMNS + ["reco
 HISTORY_CSV_HEADERS = ["scan_date"] + COMBINED_HEADERS
 OUTPUT_CSV_NAME = "all-resources.csv"
 
+# Human-readable column names for CSV/Sheet (same order as HISTORY_CSV_HEADERS)
+DISPLAY_HEADERS = [
+    "Scan Date",
+    "Cluster",
+    "Namespace",
+    "Pod",
+    "Container",
+    "Node",
+    "Workload Kind",
+    "Workload Name",
+    "Replicas",
+    "CPU Request",
+    "CPU Limit",
+    "Memory Request",
+    "Memory Limit",
+    "Ephemeral Storage Request",
+    "Ephemeral Storage Limit",
+    "Status",
+    "Node CPU Capacity",
+    "Node CPU Allocatable",
+    "Node Memory Capacity",
+    "Node Memory Allocatable",
+    "Node Disk Capacity",
+    "Node Disk Allocatable",
+    "Node CPU Requested",
+    "Node Memory Requested",
+    "Node Disk Requested",
+    "Node CPU Util %",
+    "Node Memory Util %",
+    "Node Disk Util %",
+    "Namespace Pod Count",
+    "Namespace Container Count",
+    "Recommendations",
+]
+
+
+def _format_value_for_display(key: str, value: Any) -> str:
+    """Return a human-readable string for a given column value."""
+    if value is None or value == "":
+        return ""
+    if key in ("cpu_request", "cpu_limit"):
+        mc = quantity_to_millicores(str(value)) if isinstance(value, str) else float(value)
+        return format_millicores(mc) if mc else str(value)
+    if key in (
+        "memory_request",
+        "memory_limit",
+        "ephemeral_storage_request",
+        "ephemeral_storage_limit",
+        "node_memory_capacity",
+        "node_memory_allocatable",
+        "node_ephemeral_storage_capacity",
+        "node_ephemeral_storage_allocatable",
+        "node_memory_requested_bytes",
+        "node_ephemeral_storage_requested_bytes",
+    ):
+        n = quantity_to_bytes(str(value)) if isinstance(value, str) else float(value)
+        return format_bytes(n) if n else str(value)
+    if key in ("node_cpu_capacity", "node_cpu_allocatable"):
+        # Stored as cores (e.g. "8") — convert to millicores for formatter
+        s = str(value).strip()
+        if not s:
+            return ""
+        if s.endswith("m"):
+            return format_millicores(quantity_to_millicores(s))
+        try:
+            cores = float(s)
+            return format_millicores(cores * 1000) if cores > 0 else ""
+        except ValueError:
+            return s
+    if key == "node_cpu_requested_millicores":
+        try:
+            return format_millicores(float(value))
+        except (TypeError, ValueError):
+            return str(value)
+    if key in ("node_cpu_util_pct", "node_memory_util_pct", "node_disk_util_pct"):
+        try:
+            pct = float(value)
+            return f"{pct:.1f}%" if pct == pct else ""
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value).strip()
+
+
+def _format_row_for_display(row: dict) -> dict:
+    """Return a new row dict with human-readable values for CSV/Sheet display."""
+    out = {}
+    for k in HISTORY_CSV_HEADERS:
+        v = row.get(k)
+        if k in (
+            "scan_date",
+            "cluster",
+            "namespace",
+            "pod",
+            "container",
+            "node",
+            "workload_kind",
+            "workload_name",
+            "replicas",
+            "status",
+            "ns_pod_count",
+            "ns_container_count",
+            "recommendations",
+        ):
+            out[k] = v if v is not None and str(v).strip() else ""
+        else:
+            out[k] = _format_value_for_display(k, v) if v else ""
+    return out
+
 
 def _build_combined_rows(
     rows: List[dict],
@@ -391,7 +505,7 @@ def write_csv(
     output_dir: Path,
     run_ts: str,
 ) -> None:
-    """Append combined data (with scan_date) to the single cumulative CSV for year-long history."""
+    """Append combined data (with scan_date) to the single cumulative CSV; human-readable values and headers."""
     output_dir.mkdir(parents=True, exist_ok=True)
     combined = _build_combined_rows(rows, summary, node_util, recommendations)
     for r in combined:
@@ -399,10 +513,12 @@ def write_csv(
     path = output_dir / OUTPUT_CSV_NAME
     file_exists = path.exists()
     with open(path, "a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=HISTORY_CSV_HEADERS, extrasaction="ignore")
+        writer = csv.writer(f)
         if not file_exists:
-            w.writeheader()
-        w.writerows(combined)
+            writer.writerow(DISPLAY_HEADERS)
+        for r in combined:
+            formatted = _format_row_for_display(r)
+            writer.writerow([formatted.get(k, "") for k in HISTORY_CSV_HEADERS])
     LOG.info("Appended %s rows to %s (scan_date=%s)", len(combined), path, run_ts)
 
 
@@ -431,16 +547,17 @@ def update_google_sheet(
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(sheet_key.strip())
 
-    # Single sheet: append combined rows with scan_date (same layout as all-resources.csv, year-long history)
+    # Single sheet: append combined rows with scan_date; human-readable headers and values
     combined = _build_combined_rows(rows, summary, node_util, recommendations)
     for r in combined:
         r["scan_date"] = run_ts
     try:
         ws_all = sh.worksheet("All Resources")
     except gspread.WorksheetNotFound:
-        ws_all = sh.add_worksheet("All Resources", rows=1, cols=len(HISTORY_CSV_HEADERS))
-        ws_all.update("A1", [HISTORY_CSV_HEADERS], value_input_option="RAW")
-    new_rows = [[r.get(h, "") for h in HISTORY_CSV_HEADERS] for r in combined]
+        ws_all = sh.add_worksheet("All Resources", rows=1, cols=len(DISPLAY_HEADERS))
+        ws_all.update("A1", [DISPLAY_HEADERS], value_input_option="RAW")
+    formatted_rows = [_format_row_for_display(r) for r in combined]
+    new_rows = [[row.get(k, "") for k in HISTORY_CSV_HEADERS] for row in formatted_rows]
     if new_rows:
         ws_all.append_rows(new_rows, value_input_option="RAW")
     LOG.info("Appended %s rows to sheet 'All Resources' (scan_date=%s)", len(new_rows), run_ts)
