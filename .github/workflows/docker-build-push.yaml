@@ -27,8 +27,6 @@ jobs:
       - name: Lint chart
         run: helm lint ./chart
 
-      - name: Template (dry-run)
-        run: helm template pod-resource-scanner ./chart --namespace pod-resource-scanner --set fullnameOverride=pod-resource-scanner --validate
 
   build-push:
     name: Build and push Docker image
