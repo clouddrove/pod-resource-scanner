@@ -594,6 +594,8 @@ def update_google_sheet(
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet("All Resources", rows=num_metrics + 10, cols=num_containers + 10)
 
+    # Clear sheet first so any old content at the bottom (e.g. "Resource totals by namespace") is removed
+    ws.clear()
     sheet_data = [header_row] + data_rows
     ws.update(range_name="A1", values=sheet_data, value_input_option="RAW")
     LOG.info(
@@ -731,14 +733,20 @@ def _update_dashboard_sheet(
     data_ws.update(range_name="L2", values=rec_detail_rows, value_input_option="RAW")
 
     # Container details (request / limit / suggestions) — full 8 columns at P1 so limits and suggestions are visible
+    # Sort by namespace (then pod, container) so we can merge the Namespace column per group
+    sorted_combined: List[dict] = []
     if formatted_combined:
+        sorted_combined = sorted(
+            formatted_combined[:1000],
+            key=lambda r: (str(r.get("namespace", "")), str(r.get("pod", "")), str(r.get("container", "")),
+        )
         detail_header = [
             "Namespace", "Pod", "Container", "CPU Request", "CPU Limit",
             "Memory Request", "Memory Limit", "Recommendations",
         ]
         # Title row must span 8 columns so the whole table is written (no truncated columns)
         detail_rows = [["Container details (request / limit / suggestions)", "", "", "", "", "", "", ""], detail_header]
-        for r in formatted_combined[:1000]:
+        for r in sorted_combined:
             detail_rows.append([
                 str(r.get("namespace", "")),
                 str(r.get("pod", "")),
@@ -790,6 +798,30 @@ def _update_dashboard_sheet(
                 },
             },
         })
+    # Merge Namespace column (P) for consecutive rows with the same namespace
+    if sorted_combined:
+        ns_col = 15  # P
+        data_start_row = 2  # 0-based: title 0, header 1, data from 2
+        i = 0
+        while i < len(sorted_combined):
+            ns = str(sorted_combined[i].get("namespace", ""))
+            j = i + 1
+            while j < len(sorted_combined) and str(sorted_combined[j].get("namespace", "")) == ns:
+                j += 1
+            if j - i >= 2:
+                requests.append({
+                    "mergeCells": {
+                        "range": {
+                            "sheetId": data_sheet_id,
+                            "startRowIndex": data_start_row + i,
+                            "endRowIndex": data_start_row + j,
+                            "startColumnIndex": ns_col,
+                            "endColumnIndex": ns_col + 1,
+                        },
+                        "mergeType": "MERGE_ALL",
+                    },
+                })
+            i = j
 
     # Prune old run tabs: keep only the last N (so we have historical data but not hundreds of tabs)
     keep_n = int(os.environ.get("POD_SCANNER_SHEET_RUN_TABS_KEEP", "10"))
