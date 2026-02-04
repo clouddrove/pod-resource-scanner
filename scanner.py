@@ -595,13 +595,13 @@ def update_google_sheet(
         ws = sh.add_worksheet("All Resources", rows=num_metrics + 10, cols=num_containers + 10)
 
     sheet_data = [header_row] + data_rows
-    ws.update("A1", sheet_data, value_input_option="RAW")
+    ws.update(range_name="A1", values=sheet_data, value_input_option="RAW")
     LOG.info(
         "Updated sheet 'All Resources' (metrics vertical, containers horizontal): %s metrics × %s containers (scan_date=%s)",
         num_metrics, num_containers, run_ts,
     )
 
-    _update_dashboard_sheet(sh, summary, node_util, recommendations, run_ts, formatted)
+    _update_dashboard_sheet(sh, summary, node_util, recommendations, run_ts, formatted, combined)
 
 
 def _dashboard_get_existing_chart_ids(sh, dashboard_sheet_id: int) -> List[int]:
@@ -661,8 +661,11 @@ _COLORS = {
     "dash_row4": {"red": 0.94, "green": 0.94, "blue": 0.96},
 }
 _DASHBOARD_NS_END_ROW = 52     # 0-based endRowIndex for namespace table
-_DASHBOARD_NODE_END_ROW = 52
-_DASHBOARD_REC_END_ROW = 25
+_RUN_NODE_MAX_DATA = 10
+_RUN_REC_TYPE_MAX_DATA = 10
+_RUN_REC_DETAILED_MAX = 100
+_DASHBOARD_NODE_END_ROW = 2 + 1 + _RUN_NODE_MAX_DATA   # 0-based: title+header+data
+_DASHBOARD_REC_END_ROW = 2 + 1 + _RUN_REC_TYPE_MAX_DATA
 
 
 def _update_dashboard_sheet(
@@ -672,17 +675,18 @@ def _update_dashboard_sheet(
     recommendations: List[dict],
     run_ts: str,
     formatted_combined: Optional[List[dict]] = None,
+    combined_raw: Optional[List[dict]] = None,
 ) -> None:
     """Create a new 'Run <timestamp>' tab each run; keep last N run tabs; Dashboard visualizes the latest (historical data)."""
     run_tab_title = _RUN_SHEET_PREFIX + run_ts
-    data_ws = sh.add_worksheet(run_tab_title, rows=60, cols=22)
+    data_ws = sh.add_worksheet(run_tab_title, rows=115, cols=23)
     data_sheet_id = data_ws.id
+    ns_totals: Dict[str, Dict[str, Any]] = {}
     max_ns_rows = 50
-    max_node_rows = 50
-    max_rec_rows = 25
+    max_node_data = min(_RUN_NODE_MAX_DATA, max(1, len(node_util)))
 
     # Row 0: last scan timestamp (referenced by Dashboard KPIs)
-    data_ws.update("A1", [["Last scan: " + run_ts]], value_input_option="RAW")
+    data_ws.update(range_name="A1", values=[["Last scan: " + run_ts]], value_input_option="RAW")
     # Namespace block: A2 = title, A3:C3 = headers, A4:C52 = data
     ns_sorted = sorted(summary, key=lambda x: (str(x.get("cluster", "")), str(x.get("namespace", ""))))
     ns_rows = [["By Namespace"], ["Namespace", "Pod Count", "Container Count"]]
@@ -694,33 +698,40 @@ def _update_dashboard_sheet(
         ])
     while len(ns_rows) < 2 + max_ns_rows:
         ns_rows.append(["", "", ""])
-    data_ws.update("A2", ns_rows, value_input_option="RAW")
-    # Node utilization: E2 = title, E3:H3 = headers, E4:H52 = data
+    data_ws.update(range_name="A2", values=ns_rows, value_input_option="RAW")
+    # Node utilization: E2 = title, E3:H3 = headers, E4:H = data (compact, no empty padding)
     node_sorted = sorted(node_util, key=lambda x: (str(x.get("cluster", "")), str(x.get("node", ""))))
     node_rows = [["Node utilization (%)"], ["Node", "CPU %", "Memory %", "Disk %"]]
-    for nu in node_sorted[: max_node_rows - 1]:
+    for nu in node_sorted[:max_node_data]:
         node_rows.append([
             str(nu.get("node", "")),
             nu.get("cpu_util_pct", ""),
             nu.get("memory_util_pct", ""),
             nu.get("disk_util_pct", ""),
         ])
-    while len(node_rows) < 1 + max_node_rows:
-        node_rows.append(["", "", "", ""])
-    data_ws.update("E2", node_rows, value_input_option="RAW")
-    # Recommendations: J2 = title, J3:K3 = headers, J4:K25 = data
+    data_ws.update(range_name="E2", values=node_rows, value_input_option="RAW")
+    # Recommendations by type: J2 = title, J3:K3 = headers, J4:K = data (compact)
     rec_by_type: Dict[str, int] = {}
     for r in recommendations:
         t = str(r.get("type") or "other")
         rec_by_type[t] = rec_by_type.get(t, 0) + 1
+    rec_sorted = sorted(rec_by_type.items())
     rec_rows = [["Recommendations by type"], ["Type", "Count"]]
-    for t, count in sorted(rec_by_type.items())[: max_rec_rows - 1]:
+    for t, count in rec_sorted[:_RUN_REC_TYPE_MAX_DATA]:
         rec_rows.append([t, count])
-    while len(rec_rows) < 1 + max_rec_rows:
-        rec_rows.append(["", ""])
-    data_ws.update("J2", rec_rows, value_input_option="RAW")
+    data_ws.update(range_name="J2", values=rec_rows, value_input_option="RAW")
+    # Recommendations (detailed): L2 = title, L3:O3 = headers, L4:O = up to 100 rows (Type, Target, Reason, Action)
+    rec_detail_rows = [["Recommendations (detailed)", "", "", ""], ["Type", "Target", "Reason", "Action"]]
+    for r in recommendations[:_RUN_REC_DETAILED_MAX]:
+        rec_detail_rows.append([
+            str(r.get("type") or ""),
+            str(r.get("target") or ""),
+            str(r.get("reason") or ""),
+            str(r.get("action") or ""),
+        ])
+    data_ws.update(range_name="L2", values=rec_detail_rows, value_input_option="RAW")
 
-    # Container details (request / limit / suggestions) — full 8 columns so limits and suggestions are visible
+    # Container details (request / limit / suggestions) — full 8 columns at P1 so limits and suggestions are visible
     if formatted_combined:
         detail_header = [
             "Namespace", "Pod", "Container", "CPU Request", "CPU Limit",
@@ -739,7 +750,24 @@ def _update_dashboard_sheet(
                 str(r.get("memory_limit", "")),
                 str(r.get("recommendations", "")),
             ])
-        data_ws.update("M1", detail_rows, value_input_option="RAW")
+        data_ws.update(range_name="P1", values=detail_rows, value_input_option="RAW")
+
+    # Resource totals by namespace (CPU / memory requested) for Dashboard charts and pod compare
+    if combined_raw:
+        for r in combined_raw:
+            ns = str(r.get("namespace") or "").strip()
+            if ns not in ns_totals:
+                ns_totals[ns] = {"cpu_m": 0.0, "mem_bytes": 0.0}
+            ns_totals[ns]["cpu_m"] += quantity_to_millicores(r.get("cpu_request", ""))
+            ns_totals[ns]["mem_bytes"] += quantity_to_bytes(r.get("memory_request", ""))
+        res_header = ["Resource totals by namespace (top by CPU)", "", ""]
+        res_cols = ["Namespace", "Total CPU (m)", "Total Memory (bytes)"]
+        res_rows = [res_header, res_cols]
+        for ns, tot in sorted(ns_totals.items(), key=lambda x: -x[1]["cpu_m"])[:50]:
+            res_rows.append([ns, round(tot["cpu_m"]), round(tot["mem_bytes"])])
+        while len(res_rows) < 2 + 50:
+            res_rows.append(["", "", ""])
+        data_ws.update(range_name="A54", values=res_rows, value_input_option="RAW")
 
     # Freeze top 2 rows and first 4 columns on run tab so headers stay visible when scrolling
     requests: List[dict] = []
@@ -752,14 +780,14 @@ def _update_dashboard_sheet(
             "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
         },
     })
-    # Widen container details columns (M–T) so CPU Limit, Memory, Recommendations are readable
+    # Widen container details columns (P–W) so CPU Limit, Memory, Recommendations are readable
     requests.append({
         "updateDimensionProperties": {
             "range": {
                 "sheetId": data_sheet_id,
                 "dimension": "COLUMNS",
-                "startIndex": 12,
-                "endIndex": 20,
+                "startIndex": 15,
+                "endIndex": 23,
             },
             "properties": {"pixelSize": 130},
             "fields": "pixelSize",
@@ -776,8 +804,11 @@ def _update_dashboard_sheet(
     to_delete = all_run_sheets[: max(0, len(all_run_sheets) - keep_n)]
     for ws in to_delete:
         requests.append({"deleteSheet": {"sheetId": ws.id}})
+    # Runs we keep (newest last); for historical comparison we want newest first
+    runs_kept = all_run_sheets[-keep_n:]
+    run_titles_newest_first = [w.title for w in reversed(runs_kept)]
 
-    # --- Dashboard tab: title, KPI cards, and charts (all reference latest run tab) ---
+    # --- Dashboard tab: title, KPI cards, Top 10, historical comparison, and charts ---
     try:
         dash_ws = sh.worksheet("Dashboard")
     except Exception:
@@ -787,14 +818,41 @@ def _update_dashboard_sheet(
     # Dashboard formulas reference the new run tab by name (escape single quote in sheet name)
     _dn = "'" + run_tab_title.replace("'", "''") + "'!"
     dash_title = "Pod Resource Scanner — Dashboard"
+    _node_end = str(3 + _RUN_NODE_MAX_DATA)   # 1-based row after last node data (title+header+10)
+    _rec_end = str(3 + _RUN_REC_TYPE_MAX_DATA)
     kpi_rows = [
         [dash_title, "", "", "", "", "Last run: "],
-        ["Total Pods", "=SUM(" + _dn + "B4:B52)", "Total Containers", "=SUM(" + _dn + "C4:C52)", "Nodes", "=COUNTA(" + _dn + "E4:E52)"],
-        ["Recommendations", "=SUM(" + _dn + "K4:K25)", "Avg Node CPU %", "=IFERROR(ROUND(AVERAGE(" + _dn + "F4:F52),1)&\"%\",\"—\")", "Avg Memory %", "=IFERROR(ROUND(AVERAGE(" + _dn + "G4:G52),1)&\"%\",\"—\")"],
-        ["Avg Disk %", "=IFERROR(ROUND(AVERAGE(" + _dn + "H4:H52),1)&\"%\",\"—\")", "", "Recommendations = containers with suggested limit/request changes. See run tab for full list.", "", "=" + _dn + "A1"],
+        ["Total Pods", "=SUM(" + _dn + "B4:B52)", "Total Containers", "=SUM(" + _dn + "C4:C52)", "Nodes", "=COUNTA(" + _dn + "E4:E" + _node_end + ")"],
+        ["Recommendations", "=SUM(" + _dn + "K4:K" + _rec_end + ")", "Avg Node CPU %", "=IFERROR(ROUND(AVERAGE(" + _dn + "F4:F" + _node_end + "),1)&\"%\",\"—\")", "Avg Memory %", "=IFERROR(ROUND(AVERAGE(" + _dn + "G4:G" + _node_end + "),1)&\"%\",\"—\")"],
+        ["Total CPU requested (m)", "=SUM(" + _dn + "B56:B105)", "Total Memory (Gi)", "=IFERROR(ROUND(SUM(" + _dn + "C56:C105)/1024/1024/1024, 2)&\" Gi\",\"—\")", "Avg Disk %", "=IFERROR(ROUND(AVERAGE(" + _dn + "H4:H" + _node_end + "),1)&\"%\",\"—\")"],
+        ["Recommendations = limit/request suggestions. See run tab for full container list.", "", "Top 10 namespaces by CPU:", "", "", "=" + _dn + "A1"],
     ]
+    # Top 10 namespaces by CPU (table: Rank, Namespace, CPU (m))
+    top10_header = ["Rank", "Namespace", "CPU (m)"]
+    top10_rows = [top10_header]
+    for i in range(10):
+        r = 56 + i  # run tab data rows 56-65
+        top10_rows.append([i + 1, "=" + _dn + "A" + str(r), "=" + _dn + "B" + str(r)])
     dash_ws.clear()
-    dash_ws.update("A1", kpi_rows, value_input_option="USER_ENTERED")
+    dash_ws.update(range_name="A1", values=kpi_rows + [[]] + top10_rows, value_input_option="USER_ENTERED")
+
+    # Historical comparison: one row per run tab so you can compare across runs
+    comparison_header = ["Run", "Total Pods", "Total Containers", "Total CPU (m)", "Total Memory (Gi)", "Recommendations"]
+    comparison_rows = [
+        ["Historical comparison (last " + str(keep_n) + " runs) — click Run tab to open", "", "", "", "", ""],
+        comparison_header,
+    ]
+    for title in run_titles_newest_first:
+        ref = "'" + title.replace("'", "''") + "'!"
+        comparison_rows.append([
+            title,
+            "=SUM(" + ref + "B4:B52)",
+            "=SUM(" + ref + "C4:C52)",
+            "=SUM(" + ref + "B56:B105)",
+            "=IFERROR(ROUND(SUM(" + ref + "C56:C105)/1024/1024/1024, 2)&\" Gi\",\"—\")",
+            "=SUM(" + ref + "K4:K" + _rec_end + ")",
+        ])
+    dash_ws.update(range_name="E6", values=comparison_rows, value_input_option="USER_ENTERED")
 
     # Dashboard: colored KPI rows (title = blue with white text, then alternating row colors)
     _d = dashboard_sheet_id
@@ -805,7 +863,7 @@ def _update_dashboard_sheet(
             "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold,userEnteredFormat.textFormat.foregroundColor,userEnteredFormat.textFormat.fontSize",
         },
     })
-    for row, color_key in [(1, "dash_row1"), (2, "dash_row2"), (3, "dash_row3"), (4, "dash_row4")]:
+    for row, color_key in [(1, "dash_row1"), (2, "dash_row2"), (3, "dash_row3"), (4, "dash_row4"), (5, "dash_row4")]:
         requests.append({
             "repeatCell": {
                 "range": {"sheetId": _d, "startRowIndex": row, "endRowIndex": row + 1, "startColumnIndex": 0, "endColumnIndex": 6},
@@ -813,6 +871,29 @@ def _update_dashboard_sheet(
                 "fields": "userEnteredFormat.backgroundColor",
             },
         })
+    # Top 10 table header (row 6)
+    requests.append({
+        "repeatCell": {
+            "range": {"sheetId": _d, "startRowIndex": 6, "endRowIndex": 7, "startColumnIndex": 0, "endColumnIndex": 3},
+            "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["light_gray"], "textFormat": {"bold": True}}},
+            "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold",
+        },
+    })
+    # Historical comparison: title row (E6) and header row (E7)
+    requests.append({
+        "repeatCell": {
+            "range": {"sheetId": _d, "startRowIndex": 5, "endRowIndex": 6, "startColumnIndex": 4, "endColumnIndex": 10},
+            "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["light_purple"], "textFormat": {"bold": True}}},
+            "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold",
+        },
+    })
+    requests.append({
+        "repeatCell": {
+            "range": {"sheetId": _d, "startRowIndex": 6, "endRowIndex": 7, "startColumnIndex": 4, "endColumnIndex": 10},
+            "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["purple_header"], "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}}},
+            "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold,userEnteredFormat.textFormat.foregroundColor",
+        },
+    })
 
     # Delete existing charts on Dashboard only
     chart_ids = _dashboard_get_existing_chart_ids(sh, dashboard_sheet_id)
@@ -883,7 +964,7 @@ def _update_dashboard_sheet(
                 },
                 "position": {
                     "overlayPosition": {
-                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 6, "columnIndex": 0},
+                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 18, "columnIndex": 0},
                         "offsetXPixels": 10,
                         "offsetYPixels": 0,
                         "widthPixels": 400,
@@ -894,7 +975,7 @@ def _update_dashboard_sheet(
         },
     })
 
-    node_end_row = _DASHBOARD_NODE_END_ROW
+    node_end_row = _DASHBOARD_NODE_END_ROW  # compact: title+header+up to 10 node rows
     requests.append({
         "addChart": {
             "chart": {
@@ -969,7 +1050,7 @@ def _update_dashboard_sheet(
                 },
                 "position": {
                     "overlayPosition": {
-                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 6, "columnIndex": 5},
+                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 18, "columnIndex": 5},
                         "offsetXPixels": 10,
                         "offsetYPixels": 0,
                         "widthPixels": 400,
@@ -980,7 +1061,7 @@ def _update_dashboard_sheet(
         },
     })
 
-    rec_end_row = min(2 + len(rec_by_type) + 1, _DASHBOARD_REC_END_ROW)
+    rec_end_row = min(3 + len(rec_sorted), _DASHBOARD_REC_END_ROW)  # title+header+data
     pie_spec = {
         "title": "Recommendations by type",
         "pieChart": {
@@ -1015,7 +1096,7 @@ def _update_dashboard_sheet(
                 "spec": pie_spec,
                 "position": {
                     "overlayPosition": {
-                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 6, "columnIndex": 10},
+                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 18, "columnIndex": 10},
                         "offsetXPixels": 10,
                         "offsetYPixels": 0,
                         "widthPixels": 320,
@@ -1026,6 +1107,118 @@ def _update_dashboard_sheet(
         },
     })
 
+    # Resource charts (from Run tab "Resource totals by namespace" block at A54)
+    _res_start, _res_end = 55, 75  # 0-based: header row 55, data 56-74 (top 19)
+    if combined_raw and ns_totals:
+        requests.append({
+            "addChart": {
+                "chart": {
+                    "spec": {
+                        "title": "CPU requested by namespace (top 20)",
+                        "basicChart": {
+                            "chartType": "BAR",
+                            "legendPosition": "NONE_LEGEND",
+                            "axis": [
+                                {"position": "BOTTOM_AXIS", "title": "CPU (millicores)"},
+                                {"position": "LEFT_AXIS", "title": "Namespace"},
+                            ],
+                            "domains": [{
+                                "domain": {
+                                    "sourceRange": {
+                                        "sources": [{
+                                            "sheetId": data_sheet_id,
+                                            "startRowIndex": _res_start,
+                                            "endRowIndex": _res_end,
+                                            "startColumnIndex": 0,
+                                            "endColumnIndex": 1,
+                                        }],
+                                    },
+                                },
+                            }],
+                            "series": [{
+                                "series": {
+                                    "sourceRange": {
+                                        "sources": [{
+                                            "sheetId": data_sheet_id,
+                                            "startRowIndex": _res_start,
+                                            "endRowIndex": _res_end,
+                                            "startColumnIndex": 1,
+                                            "endColumnIndex": 2,
+                                        }],
+                                    },
+                                },
+                                "targetAxis": "BOTTOM_AXIS",
+                            }],
+                            "headerCount": 1,
+                        },
+                    },
+                    "position": {
+                        "overlayPosition": {
+                            "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 32, "columnIndex": 0},
+                            "offsetXPixels": 10,
+                            "offsetYPixels": 0,
+                            "widthPixels": 450,
+                            "heightPixels": 320,
+                        },
+                    },
+                },
+            },
+        })
+        requests.append({
+            "addChart": {
+                "chart": {
+                    "spec": {
+                        "title": "Memory requested by namespace (top 20)",
+                        "basicChart": {
+                            "chartType": "BAR",
+                            "legendPosition": "NONE_LEGEND",
+                            "axis": [
+                                {"position": "BOTTOM_AXIS", "title": "Memory (bytes)"},
+                                {"position": "LEFT_AXIS", "title": "Namespace"},
+                            ],
+                            "domains": [{
+                                "domain": {
+                                    "sourceRange": {
+                                        "sources": [{
+                                            "sheetId": data_sheet_id,
+                                            "startRowIndex": _res_start,
+                                            "endRowIndex": _res_end,
+                                            "startColumnIndex": 0,
+                                            "endColumnIndex": 1,
+                                        }],
+                                    },
+                                },
+                            }],
+                            "series": [{
+                                "series": {
+                                    "sourceRange": {
+                                        "sources": [{
+                                            "sheetId": data_sheet_id,
+                                            "startRowIndex": _res_start,
+                                            "endRowIndex": _res_end,
+                                            "startColumnIndex": 2,
+                                            "endColumnIndex": 3,
+                                        }],
+                                    },
+                                },
+                                "targetAxis": "BOTTOM_AXIS",
+                            }],
+                            "headerCount": 1,
+                        },
+                    },
+                    "position": {
+                        "overlayPosition": {
+                            "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 32, "columnIndex": 5},
+                            "offsetXPixels": 10,
+                            "offsetYPixels": 0,
+                            "widthPixels": 450,
+                            "heightPixels": 320,
+                        },
+                    },
+                },
+            },
+        })
+
     # Run tab: colored section titles and bold colored header rows
     _r = data_sheet_id
     _bg = "userEnteredFormat.backgroundColor"
@@ -1034,7 +1227,8 @@ def _update_dashboard_sheet(
     for (sr, er, sc, ec), color_key in [
         ((1, 2, 0, 4), "light_blue"),      # By Namespace
         ((1, 2, 4, 8), "light_green"),     # Node utilization
-        ((1, 2, 9, 12), "light_orange"),   # Recommendations by type
+        ((1, 2, 9, 11), "light_orange"),   # Recommendations by type
+        ((1, 2, 11, 15), "light_orange"),  # Recommendations (detailed)
     ]:
         requests.append({
             "repeatCell": {
@@ -1047,7 +1241,8 @@ def _update_dashboard_sheet(
     for (sr, er, sc, ec), color_key in [
         ((2, 3, 0, 4), "blue_header"),
         ((2, 3, 4, 8), "green_header"),
-        ((2, 3, 9, 12), "orange_header"),
+        ((2, 3, 9, 11), "orange_header"),
+        ((2, 3, 11, 15), "orange_header"),
     ]:
         requests.append({
             "repeatCell": {
@@ -1056,18 +1251,18 @@ def _update_dashboard_sheet(
                 "fields": _bg + "," + _bold + ",userEnteredFormat.textFormat.foregroundColor",
             },
         })
-    # Container details: title row and header row
+    # Container details: title row and header row (columns P–W)
     if formatted_combined:
         requests.append({
             "repeatCell": {
-                "range": {"sheetId": _r, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 12, "endColumnIndex": 20},
+                "range": {"sheetId": _r, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 15, "endColumnIndex": 23},
                 "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["light_purple"]}},
                 "fields": _bg,
             },
         })
         requests.append({
             "repeatCell": {
-                "range": {"sheetId": _r, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": 12, "endColumnIndex": 20},
+                "range": {"sheetId": _r, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": 15, "endColumnIndex": 23},
                 "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["purple_header"], "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}}},
                 "fields": _bg + "," + _bold + ",userEnteredFormat.textFormat.foregroundColor",
             },
