@@ -325,7 +325,7 @@ def build_recommendations(
             recs.append({
                 "type": "change_limits",
                 "target": f"{ns}/{pod}/{cont}",
-                "reason": f"Memory limit >> request (limit {mem_lim:.0f}, request {mem_req:.0f} bytes)",
+                "reason": f"Memory limit >> request (limit {format_bytes(mem_lim)}, request {format_bytes(mem_req)})",
                 "action": "Consider lowering memory limit to match usage.",
             })
     return recs
@@ -761,10 +761,11 @@ def _update_dashboard_sheet(
             ns_totals[ns]["cpu_m"] += quantity_to_millicores(r.get("cpu_request", ""))
             ns_totals[ns]["mem_bytes"] += quantity_to_bytes(r.get("memory_request", ""))
         res_header = ["Resource totals by namespace (top by CPU)", "", ""]
-        res_cols = ["Namespace", "Total CPU (m)", "Total Memory (bytes)"]
+        res_cols = ["Namespace", "Total CPU (m)", "Total Memory (Gi)"]
         res_rows = [res_header, res_cols]
         for ns, tot in sorted(ns_totals.items(), key=lambda x: -x[1]["cpu_m"])[:50]:
-            res_rows.append([ns, round(tot["cpu_m"]), round(tot["mem_bytes"])])
+            mem_gi = round(tot["mem_bytes"] / (1024 ** 3), 2)
+            res_rows.append([ns, round(tot["cpu_m"]), mem_gi])
         while len(res_rows) < 2 + 50:
             res_rows.append(["", "", ""])
         data_ws.update(range_name="A54", values=res_rows, value_input_option="RAW")
@@ -812,7 +813,7 @@ def _update_dashboard_sheet(
     try:
         dash_ws = sh.worksheet("Dashboard")
     except Exception:
-        dash_ws = sh.add_worksheet("Dashboard", rows=70, cols=14)
+        dash_ws = sh.add_worksheet("Dashboard", rows=95, cols=14)
     dashboard_sheet_id = dash_ws.id
 
     # Dashboard formulas reference the new run tab by name (escape single quote in sheet name)
@@ -824,7 +825,7 @@ def _update_dashboard_sheet(
         [dash_title, "", "", "", "", "Last run: "],
         ["Total Pods", "=SUM(" + _dn + "B4:B52)", "Total Containers", "=SUM(" + _dn + "C4:C52)", "Nodes", "=COUNTA(" + _dn + "E4:E" + _node_end + ")"],
         ["Recommendations", "=SUM(" + _dn + "K4:K" + _rec_end + ")", "Avg Node CPU %", "=IFERROR(ROUND(AVERAGE(" + _dn + "F4:F" + _node_end + "),1)&\"%\",\"—\")", "Avg Memory %", "=IFERROR(ROUND(AVERAGE(" + _dn + "G4:G" + _node_end + "),1)&\"%\",\"—\")"],
-        ["Total CPU requested (m)", "=SUM(" + _dn + "B56:B105)", "Total Memory (Gi)", "=IFERROR(ROUND(SUM(" + _dn + "C56:C105)/1024/1024/1024, 2)&\" Gi\",\"—\")", "Avg Disk %", "=IFERROR(ROUND(AVERAGE(" + _dn + "H4:H" + _node_end + "),1)&\"%\",\"—\")"],
+        ["Total CPU requested (m)", "=SUM(" + _dn + "B56:B105)", "Total Memory (Gi)", "=IFERROR(ROUND(SUM(" + _dn + "C56:C105), 2)&\" Gi\",\"—\")", "Avg Disk %", "=IFERROR(ROUND(AVERAGE(" + _dn + "H4:H" + _node_end + "),1)&\"%\",\"—\")"],
         ["Recommendations = limit/request suggestions. See run tab for full container list.", "", "Top 10 namespaces by CPU:", "", "", "=" + _dn + "A1"],
     ]
     # Top 10 namespaces by CPU (table: Rank, Namespace, CPU (m))
@@ -834,7 +835,8 @@ def _update_dashboard_sheet(
         r = 56 + i  # run tab data rows 56-65
         top10_rows.append([i + 1, "=" + _dn + "A" + str(r), "=" + _dn + "B" + str(r)])
     dash_ws.clear()
-    dash_ws.update(range_name="A1", values=kpi_rows + [[]] + top10_rows, value_input_option="USER_ENTERED")
+    # Extra blank row between KPIs and Top 10 table to reduce clutter
+    dash_ws.update(range_name="A1", values=kpi_rows + [[]] + [[]] + top10_rows, value_input_option="USER_ENTERED")
 
     # Historical comparison: one row per run tab so you can compare across runs
     comparison_header = ["Run", "Total Pods", "Total Containers", "Total CPU (m)", "Total Memory (Gi)", "Recommendations"]
@@ -849,7 +851,7 @@ def _update_dashboard_sheet(
             "=SUM(" + ref + "B4:B52)",
             "=SUM(" + ref + "C4:C52)",
             "=SUM(" + ref + "B56:B105)",
-            "=IFERROR(ROUND(SUM(" + ref + "C56:C105)/1024/1024/1024, 2)&\" Gi\",\"—\")",
+            "=IFERROR(ROUND(SUM(" + ref + "C56:C105), 2)&\" Gi\",\"—\")",
             "=SUM(" + ref + "K4:K" + _rec_end + ")",
         ])
     dash_ws.update(range_name="E6", values=comparison_rows, value_input_option="USER_ENTERED")
@@ -871,10 +873,10 @@ def _update_dashboard_sheet(
                 "fields": "userEnteredFormat.backgroundColor",
             },
         })
-    # Top 10 table header (row 6)
+    # Top 10 table header (row 7 after extra blank row)
     requests.append({
         "repeatCell": {
-            "range": {"sheetId": _d, "startRowIndex": 6, "endRowIndex": 7, "startColumnIndex": 0, "endColumnIndex": 3},
+            "range": {"sheetId": _d, "startRowIndex": 7, "endRowIndex": 8, "startColumnIndex": 0, "endColumnIndex": 3},
             "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["light_gray"], "textFormat": {"bold": True}}},
             "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold",
         },
@@ -964,7 +966,7 @@ def _update_dashboard_sheet(
                 },
                 "position": {
                     "overlayPosition": {
-                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 18, "columnIndex": 0},
+                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 20, "columnIndex": 0},
                         "offsetXPixels": 10,
                         "offsetYPixels": 0,
                         "widthPixels": 400,
@@ -1050,7 +1052,7 @@ def _update_dashboard_sheet(
                 },
                 "position": {
                     "overlayPosition": {
-                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 18, "columnIndex": 5},
+                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 20, "columnIndex": 5},
                         "offsetXPixels": 10,
                         "offsetYPixels": 0,
                         "widthPixels": 400,
@@ -1096,7 +1098,7 @@ def _update_dashboard_sheet(
                 "spec": pie_spec,
                 "position": {
                     "overlayPosition": {
-                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 18, "columnIndex": 10},
+                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 20, "columnIndex": 10},
                         "offsetXPixels": 10,
                         "offsetYPixels": 0,
                         "widthPixels": 320,
@@ -1154,7 +1156,7 @@ def _update_dashboard_sheet(
                     },
                     "position": {
                         "overlayPosition": {
-                            "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 32, "columnIndex": 0},
+                            "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 44, "columnIndex": 0},
                             "offsetXPixels": 10,
                             "offsetYPixels": 0,
                             "widthPixels": 450,
@@ -1173,7 +1175,7 @@ def _update_dashboard_sheet(
                             "chartType": "BAR",
                             "legendPosition": "RIGHT_LEGEND",
                             "axis": [
-                                {"position": "BOTTOM_AXIS", "title": "Memory (bytes)"},
+                                {"position": "BOTTOM_AXIS", "title": "Memory (Gi)"},
                                 {"position": "LEFT_AXIS", "title": "Namespace"},
                             ],
                             "domains": [{
@@ -1208,7 +1210,7 @@ def _update_dashboard_sheet(
                     },
                     "position": {
                         "overlayPosition": {
-                            "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 32, "columnIndex": 5},
+                            "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 44, "columnIndex": 5},
                             "offsetXPixels": 10,
                             "offsetYPixels": 0,
                             "widthPixels": 450,
