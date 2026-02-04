@@ -601,7 +601,7 @@ def update_google_sheet(
         num_metrics, num_containers, run_ts,
     )
 
-    _update_dashboard_sheet(sh, summary, node_util, recommendations, run_ts)
+    _update_dashboard_sheet(sh, summary, node_util, recommendations, run_ts, formatted)
 
 
 def _dashboard_get_existing_chart_ids(sh, dashboard_sheet_id: int) -> List[int]:
@@ -648,11 +648,16 @@ _DASHBOARD_REC_END_ROW = 25
 
 
 def _update_dashboard_sheet(
-    sh, summary: List[dict], node_util: List[dict], recommendations: List[dict], run_ts: str
+    sh,
+    summary: List[dict],
+    node_util: List[dict],
+    recommendations: List[dict],
+    run_ts: str,
+    formatted_combined: Optional[List[dict]] = None,
 ) -> None:
     """Create a new 'Run <timestamp>' tab each run; keep last N run tabs; Dashboard visualizes the latest (historical data)."""
     run_tab_title = _RUN_SHEET_PREFIX + run_ts
-    data_ws = sh.add_worksheet(run_tab_title, rows=60, cols=12)
+    data_ws = sh.add_worksheet(run_tab_title, rows=60, cols=22)
     data_sheet_id = data_ws.id
     max_ns_rows = 50
     max_node_rows = 50
@@ -696,6 +701,26 @@ def _update_dashboard_sheet(
     while len(rec_rows) < 1 + max_rec_rows:
         rec_rows.append(["", ""])
     data_ws.update("J2", rec_rows, value_input_option="RAW")
+
+    # Container details (request / limit / suggestions) so each run tab has full data like before
+    if formatted_combined:
+        detail_header = [
+            "Namespace", "Pod", "Container", "CPU Request", "CPU Limit",
+            "Memory Request", "Memory Limit", "Recommendations",
+        ]
+        detail_rows = [["Container details (request / limit / suggestions)"], detail_header]
+        for r in formatted_combined[:1000]:
+            detail_rows.append([
+                str(r.get("namespace", "")),
+                str(r.get("pod", "")),
+                str(r.get("container", "")),
+                str(r.get("cpu_request", "")),
+                str(r.get("cpu_limit", "")),
+                str(r.get("memory_request", "")),
+                str(r.get("memory_limit", "")),
+                str(r.get("recommendations", "")),
+            ])
+        data_ws.update("M1", detail_rows, value_input_option="RAW")
 
     # Prune old run tabs: keep only the last N (so we have historical data but not hundreds of tabs)
     keep_n = int(os.environ.get("POD_SCANNER_SHEET_RUN_TABS_KEEP", "10"))
@@ -938,7 +963,7 @@ def _update_dashboard_sheet(
         },
     })
 
-    # Bold header row on run tab for tables
+    # Bold header rows on run tab for tables (namespace, node util, rec by type)
     for start_col, end_col in [(0, 3), (4, 8), (9, 11)]:
         requests.append({
             "repeatCell": {
@@ -948,6 +973,21 @@ def _update_dashboard_sheet(
                     "endRowIndex": _DASHBOARD_NS_HEADER_ROW + 1,
                     "startColumnIndex": start_col,
                     "endColumnIndex": end_col,
+                },
+                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                "fields": "userEnteredFormat.textFormat.bold",
+            },
+        })
+    # Bold container details header (row 1, cols M–T)
+    if formatted_combined:
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": data_sheet_id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 2,
+                    "startColumnIndex": 12,
+                    "endColumnIndex": 20,
                 },
                 "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
                 "fields": "userEnteredFormat.textFormat.bold",
