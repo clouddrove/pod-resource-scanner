@@ -67,7 +67,7 @@ A lightweight, **read-only** Kubernetes tool that runs as a CronJob on **AKS**, 
 
 - 📄 **CSV (always)** — Single file: **`all-resources.csv`**. Each run **appends** rows with a **Scan Date** column. One row per container per scan. Columns use human-readable headers (e.g. "Memory Request", "Node CPU Util %") and values (e.g. "256 Mi", "3.1 cores", "38.9%").
 
-- 📋 **Google Sheet (optional)** — One sheet **"All Resources"**: same columns as the CSV, appended each run. Use for dashboards and long-term visibility.
+- 📋 **Google Sheet (optional)** — One sheet **"All Resources"** with **metrics vertical, data horizontal**: **rows = metrics** (Scan Date, CPU Request, CPU Limit, Memory Request, Memory Limit, Status, Node %, Recommendations), **columns = containers** (namespace / pod / container). Compare containers side-by-side; each run overwrites with the latest snapshot.
 
 ---
 
@@ -167,7 +167,7 @@ RBAC: the chart creates a **ClusterRole** and **ClusterRoleBinding** (read-only)
    helm upgrade pod-resource-scanner ./chart -n pod-resource-scanner --set googleSheet.enabled=true
    ```
 
-The job will append to `all-resources.csv` and to the **All Resources** sheet on each run.
+The job appends to `all-resources.csv` and updates the **All Resources** sheet: metrics as rows, containers as columns so you can compare containers horizontally.
 
 ---
 

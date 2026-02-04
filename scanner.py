@@ -385,6 +385,16 @@ DISPLAY_HEADERS = [
     "Recommendations",
 ]
 
+# Sheet layout: metrics vertical (rows), containers horizontal (columns) for easy side-by-side comparison
+SHEET_METRIC_ROWS = [
+    "Scan Date", "CPU Request", "CPU Limit", "Memory Request", "Memory Limit",
+    "Status", "Node CPU %", "Node Mem %", "Node Disk %", "Recommendations",
+]
+_SHEET_METRIC_KEYS = [
+    "scan_date", "cpu_request", "cpu_limit", "memory_request", "memory_limit",
+    "status", "node_cpu_util_pct", "node_memory_util_pct", "node_disk_util_pct", "recommendations",
+]
+
 
 def _format_value_for_display(key: str, value: Any) -> str:
     """Return a human-readable string for a given column value."""
@@ -522,6 +532,14 @@ def write_csv(
     LOG.info("Appended %s rows to %s (scan_date=%s)", len(combined), path, run_ts)
 
 
+def _container_column_label(row: dict) -> str:
+    """Short label for sheet column: namespace / pod / container."""
+    ns = (row.get("namespace") or "").strip()
+    pod = (row.get("pod") or "").strip()
+    cont = (row.get("container") or "").strip()
+    return f"{ns} / {pod} / {cont}" if (ns or pod or cont) else "—"
+
+
 def update_google_sheet(
     rows: List[dict],
     summary: List[dict],
@@ -529,7 +547,7 @@ def update_google_sheet(
     recommendations: List[dict],
     run_ts: str,
 ):
-    """Update Google Sheet with one combined sheet (all data) and optional History append."""
+    """Update Google Sheet: metrics vertical (rows), containers horizontal (columns) for easy comparison."""
     import gspread
     from google.oauth2.service_account import Credentials
 
@@ -547,20 +565,43 @@ def update_google_sheet(
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(sheet_key.strip())
 
-    # Single sheet: append combined rows with scan_date; human-readable headers and values
     combined = _build_combined_rows(rows, summary, node_util, recommendations)
     for r in combined:
         r["scan_date"] = run_ts
+    formatted = [_format_row_for_display(r) for r in combined]
+    # Sort by namespace, pod, container for stable column order
+    formatted.sort(key=lambda r: (
+        str(r.get("namespace", "")),
+        str(r.get("pod", "")),
+        str(r.get("container", "")),
+    ))
+
+    num_metrics = len(SHEET_METRIC_ROWS)
+    num_containers = len(formatted)
+    if num_containers == 0:
+        LOG.info("No container data; skipping Google Sheet update")
+        return
+
+    # Build transposed matrix: rows = metrics, columns = [Metric name, container1, container2, ...]
+    # Row 1: ["Metric", label1, label2, ...]
+    header_row = ["Metric"] + [_container_column_label(r) for r in formatted]
+    data_rows = []
+    for i, metric_name in enumerate(SHEET_METRIC_ROWS):
+        key = _SHEET_METRIC_KEYS[i]
+        values = [str(r.get(key, "")) for r in formatted]
+        data_rows.append([metric_name] + values)
+
     try:
-        ws_all = sh.worksheet("All Resources")
+        ws = sh.worksheet("All Resources")
     except gspread.WorksheetNotFound:
-        ws_all = sh.add_worksheet("All Resources", rows=1, cols=len(DISPLAY_HEADERS))
-        ws_all.update("A1", [DISPLAY_HEADERS], value_input_option="RAW")
-    formatted_rows = [_format_row_for_display(r) for r in combined]
-    new_rows = [[row.get(k, "") for k in HISTORY_CSV_HEADERS] for row in formatted_rows]
-    if new_rows:
-        ws_all.append_rows(new_rows, value_input_option="RAW")
-    LOG.info("Appended %s rows to sheet 'All Resources' (scan_date=%s)", len(new_rows), run_ts)
+        ws = sh.add_worksheet("All Resources", rows=num_metrics + 10, cols=num_containers + 10)
+
+    sheet_data = [header_row] + data_rows
+    ws.update("A1", sheet_data, value_input_option="RAW")
+    LOG.info(
+        "Updated sheet 'All Resources' (metrics vertical, containers horizontal): %s metrics × %s containers (scan_date=%s)",
+        num_metrics, num_containers, run_ts,
+    )
 
 
 def validate_config(output_dir: Path, update_sheet: bool) -> None:
