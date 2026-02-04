@@ -642,6 +642,24 @@ def _dashboard_get_existing_chart_ids(sh, dashboard_sheet_id: int) -> List[int]:
 # Option B: one new tab per run (historical data); Dashboard visualizes the latest run. Keep last N run tabs.
 _RUN_SHEET_PREFIX = "Run "
 _DASHBOARD_NS_HEADER_ROW = 2   # 0-based: row 2 = headers, row 3+ = data
+
+# Colors (RGB 0–1) for Run tab and Dashboard
+_COLORS = {
+    "light_blue": {"red": 0.73, "green": 0.87, "blue": 1},
+    "blue_header": {"red": 0.26, "green": 0.52, "blue": 0.96},
+    "light_green": {"red": 0.73, "green": 1, "blue": 0.85},
+    "green_header": {"red": 0.2, "green": 0.72, "blue": 0.45},
+    "light_orange": {"red": 1, "green": 0.92, "blue": 0.73},
+    "orange_header": {"red": 0.95, "green": 0.6, "blue": 0.2},
+    "light_purple": {"red": 0.9, "green": 0.85, "blue": 1},
+    "purple_header": {"red": 0.55, "green": 0.4, "blue": 0.85},
+    "light_gray": {"red": 0.96, "green": 0.96, "blue": 0.96},
+    "dash_title": {"red": 0.25, "green": 0.47, "blue": 0.85},
+    "dash_row1": {"red": 0.87, "green": 0.92, "blue": 1},
+    "dash_row2": {"red": 0.85, "green": 1, "blue": 0.9},
+    "dash_row3": {"red": 1, "green": 0.95, "blue": 0.85},
+    "dash_row4": {"red": 0.94, "green": 0.94, "blue": 0.96},
+}
 _DASHBOARD_NS_END_ROW = 52     # 0-based endRowIndex for namespace table
 _DASHBOARD_NODE_END_ROW = 52
 _DASHBOARD_REC_END_ROW = 25
@@ -777,6 +795,24 @@ def _update_dashboard_sheet(
     ]
     dash_ws.clear()
     dash_ws.update("A1", kpi_rows, value_input_option="USER_ENTERED")
+
+    # Dashboard: colored KPI rows (title = blue with white text, then alternating row colors)
+    _d = dashboard_sheet_id
+    requests.append({
+        "repeatCell": {
+            "range": {"sheetId": _d, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 6},
+            "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["dash_title"], "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}, "fontSize": 12}}},
+            "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold,userEnteredFormat.textFormat.foregroundColor,userEnteredFormat.textFormat.fontSize",
+        },
+    })
+    for row, color_key in [(1, "dash_row1"), (2, "dash_row2"), (3, "dash_row3"), (4, "dash_row4")]:
+        requests.append({
+            "repeatCell": {
+                "range": {"sheetId": _d, "startRowIndex": row, "endRowIndex": row + 1, "startColumnIndex": 0, "endColumnIndex": 6},
+                "cell": {"userEnteredFormat": {"backgroundColor": _COLORS[color_key]}},
+                "fields": "userEnteredFormat.backgroundColor",
+            },
+        })
 
     # Delete existing charts on Dashboard only
     chart_ids = _dashboard_get_existing_chart_ids(sh, dashboard_sheet_id)
@@ -990,36 +1026,60 @@ def _update_dashboard_sheet(
         },
     })
 
-    # Bold header rows on run tab for tables (namespace, node util, rec by type)
-    for start_col, end_col in [(0, 3), (4, 8), (9, 11)]:
+    # Run tab: colored section titles and bold colored header rows
+    _r = data_sheet_id
+    _bg = "userEnteredFormat.backgroundColor"
+    _bold = "userEnteredFormat.textFormat.bold"
+    # Section title rows (light backgrounds)
+    for (sr, er, sc, ec), color_key in [
+        ((1, 2, 0, 4), "light_blue"),      # By Namespace
+        ((1, 2, 4, 8), "light_green"),     # Node utilization
+        ((1, 2, 9, 12), "light_orange"),   # Recommendations by type
+    ]:
         requests.append({
             "repeatCell": {
-                "range": {
-                    "sheetId": data_sheet_id,
-                    "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
-                    "endRowIndex": _DASHBOARD_NS_HEADER_ROW + 1,
-                    "startColumnIndex": start_col,
-                    "endColumnIndex": end_col,
-                },
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
-                "fields": "userEnteredFormat.textFormat.bold",
+                "range": {"sheetId": _r, "startRowIndex": sr, "endRowIndex": er, "startColumnIndex": sc, "endColumnIndex": ec},
+                "cell": {"userEnteredFormat": {"backgroundColor": _COLORS[color_key]}},
+                "fields": _bg,
             },
         })
-    # Bold container details header (row 1, cols M–T)
+    # Table header rows (darker background + bold)
+    for (sr, er, sc, ec), color_key in [
+        ((2, 3, 0, 4), "blue_header"),
+        ((2, 3, 4, 8), "green_header"),
+        ((2, 3, 9, 12), "orange_header"),
+    ]:
+        requests.append({
+            "repeatCell": {
+                "range": {"sheetId": _r, "startRowIndex": sr, "endRowIndex": er, "startColumnIndex": sc, "endColumnIndex": ec},
+                "cell": {"userEnteredFormat": {"backgroundColor": _COLORS[color_key], "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}}},
+                "fields": _bg + "," + _bold + ",userEnteredFormat.textFormat.foregroundColor",
+            },
+        })
+    # Container details: title row and header row
     if formatted_combined:
         requests.append({
             "repeatCell": {
-                "range": {
-                    "sheetId": data_sheet_id,
-                    "startRowIndex": 1,
-                    "endRowIndex": 2,
-                    "startColumnIndex": 12,
-                    "endColumnIndex": 20,
-                },
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
-                "fields": "userEnteredFormat.textFormat.bold",
+                "range": {"sheetId": _r, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 12, "endColumnIndex": 20},
+                "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["light_purple"]}},
+                "fields": _bg,
             },
         })
+        requests.append({
+            "repeatCell": {
+                "range": {"sheetId": _r, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": 12, "endColumnIndex": 20},
+                "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["purple_header"], "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}}},
+                "fields": _bg + "," + _bold + ",userEnteredFormat.textFormat.foregroundColor",
+            },
+        })
+    # Last scan cell (A1) subtle background
+    requests.append({
+        "repeatCell": {
+            "range": {"sheetId": _r, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 1},
+            "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["light_gray"]}},
+            "fields": _bg,
+        },
+    })
 
     if requests:
         sh.batch_update({"requests": requests})
