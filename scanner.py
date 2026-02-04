@@ -702,13 +702,14 @@ def _update_dashboard_sheet(
         rec_rows.append(["", ""])
     data_ws.update("J2", rec_rows, value_input_option="RAW")
 
-    # Container details (request / limit / suggestions) so each run tab has full data like before
+    # Container details (request / limit / suggestions) — full 8 columns so limits and suggestions are visible
     if formatted_combined:
         detail_header = [
             "Namespace", "Pod", "Container", "CPU Request", "CPU Limit",
             "Memory Request", "Memory Limit", "Recommendations",
         ]
-        detail_rows = [["Container details (request / limit / suggestions)"], detail_header]
+        # Title row must span 8 columns so the whole table is written (no truncated columns)
+        detail_rows = [["Container details (request / limit / suggestions)", "", "", "", "", "", "", ""], detail_header]
         for r in formatted_combined[:1000]:
             detail_rows.append([
                 str(r.get("namespace", "")),
@@ -722,6 +723,31 @@ def _update_dashboard_sheet(
             ])
         data_ws.update("M1", detail_rows, value_input_option="RAW")
 
+    # Freeze top 2 rows and first 4 columns on run tab so headers stay visible when scrolling
+    requests: List[dict] = []
+    requests.append({
+        "updateSheetProperties": {
+            "properties": {
+                "sheetId": data_sheet_id,
+                "gridProperties": {"frozenRowCount": 2, "frozenColumnCount": 4},
+            },
+            "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
+        },
+    })
+    # Widen container details columns (M–T) so CPU Limit, Memory, Recommendations are readable
+    requests.append({
+        "updateDimensionProperties": {
+            "range": {
+                "sheetId": data_sheet_id,
+                "dimension": "COLUMNS",
+                "startIndex": 12,
+                "endIndex": 20,
+            },
+            "properties": {"pixelSize": 130},
+            "fields": "pixelSize",
+        },
+    })
+
     # Prune old run tabs: keep only the last N (so we have historical data but not hundreds of tabs)
     keep_n = int(os.environ.get("POD_SCANNER_SHEET_RUN_TABS_KEEP", "10"))
     all_run_sheets = [data_ws] + [
@@ -730,7 +756,6 @@ def _update_dashboard_sheet(
     ]
     all_run_sheets.sort(key=lambda w: w.title)  # oldest first (ISO timestamp sorts correctly)
     to_delete = all_run_sheets[: max(0, len(all_run_sheets) - keep_n)]
-    requests: List[dict] = []
     for ws in to_delete:
         requests.append({"deleteSheet": {"sheetId": ws.id}})
 
@@ -745,9 +770,10 @@ def _update_dashboard_sheet(
     _dn = "'" + run_tab_title.replace("'", "''") + "'!"
     dash_title = "Pod Resource Scanner — Dashboard"
     kpi_rows = [
-        [dash_title, "", "", "", "", "=" + _dn + "A1"],
+        [dash_title, "", "", "", "", "Last run: "],
         ["Total Pods", "=SUM(" + _dn + "B4:B52)", "Total Containers", "=SUM(" + _dn + "C4:C52)", "Nodes", "=COUNTA(" + _dn + "E4:E52)"],
         ["Recommendations", "=SUM(" + _dn + "K4:K25)", "Avg Node CPU %", "=IFERROR(ROUND(AVERAGE(" + _dn + "F4:F52),1)&\"%\",\"—\")", "Avg Memory %", "=IFERROR(ROUND(AVERAGE(" + _dn + "G4:G52),1)&\"%\",\"—\")"],
+        ["Avg Disk %", "=IFERROR(ROUND(AVERAGE(" + _dn + "H4:H52),1)&\"%\",\"—\")", "", "Recommendations = containers with suggested limit/request changes. See run tab for full list.", "", "=" + _dn + "A1"],
     ]
     dash_ws.clear()
     dash_ws.update("A1", kpi_rows, value_input_option="USER_ENTERED")
@@ -760,17 +786,18 @@ def _update_dashboard_sheet(
     # Charts: data from run tab (data_sheet_id), positioned on Dashboard (dashboard_sheet_id)
     # Place charts below KPIs: anchor row 5
     ns_end_row = _DASHBOARD_NS_END_ROW
+    # Horizontal bar so namespace labels are readable (no truncation)
     requests.append({
         "addChart": {
             "chart": {
                 "spec": {
                     "title": "Pods by Namespace",
                     "basicChart": {
-                        "chartType": "COLUMN",
-                        "legendPosition": "BOTTOM_LEGEND",
+                        "chartType": "BAR",
+                        "legendPosition": "RIGHT_LEGEND",
                         "axis": [
-                            {"position": "BOTTOM_AXIS", "title": "Namespace"},
-                            {"position": "LEFT_AXIS", "title": "Count"},
+                            {"position": "BOTTOM_AXIS", "title": "Count"},
+                            {"position": "LEFT_AXIS", "title": "Namespace"},
                         ],
                         "domains": [{
                             "domain": {
@@ -798,7 +825,7 @@ def _update_dashboard_sheet(
                                         }],
                                     },
                                 },
-                                "targetAxis": "LEFT_AXIS",
+                                "targetAxis": "BOTTOM_AXIS",
                             },
                             {
                                 "series": {
@@ -812,7 +839,7 @@ def _update_dashboard_sheet(
                                         }],
                                     },
                                 },
-                                "targetAxis": "LEFT_AXIS",
+                                "targetAxis": "BOTTOM_AXIS",
                             },
                         ],
                         "headerCount": 1,
@@ -820,11 +847,11 @@ def _update_dashboard_sheet(
                 },
                 "position": {
                     "overlayPosition": {
-                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 5, "columnIndex": 0},
+                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 6, "columnIndex": 0},
                         "offsetXPixels": 10,
                         "offsetYPixels": 0,
-                        "widthPixels": 380,
-                        "heightPixels": 280,
+                        "widthPixels": 400,
+                        "heightPixels": 320,
                     },
                 },
             },
@@ -906,11 +933,11 @@ def _update_dashboard_sheet(
                 },
                 "position": {
                     "overlayPosition": {
-                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 5, "columnIndex": 5},
+                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 6, "columnIndex": 5},
                         "offsetXPixels": 10,
                         "offsetYPixels": 0,
                         "widthPixels": 400,
-                        "heightPixels": 280,
+                        "heightPixels": 320,
                     },
                 },
             },
@@ -952,11 +979,11 @@ def _update_dashboard_sheet(
                 "spec": pie_spec,
                 "position": {
                     "overlayPosition": {
-                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 5, "columnIndex": 10},
+                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 6, "columnIndex": 10},
                         "offsetXPixels": 10,
                         "offsetYPixels": 0,
                         "widthPixels": 320,
-                        "heightPixels": 280,
+                        "heightPixels": 320,
                     },
                 },
             },
