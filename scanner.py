@@ -1117,7 +1117,7 @@ def _update_dashboard_sheet(
                         "title": "CPU requested by namespace (top 20)",
                         "basicChart": {
                             "chartType": "BAR",
-                            "legendPosition": "NONE_LEGEND",
+                            "legendPosition": "RIGHT_LEGEND",
                             "axis": [
                                 {"position": "BOTTOM_AXIS", "title": "CPU (millicores)"},
                                 {"position": "LEFT_AXIS", "title": "Namespace"},
@@ -1171,7 +1171,7 @@ def _update_dashboard_sheet(
                         "title": "Memory requested by namespace (top 20)",
                         "basicChart": {
                             "chartType": "BAR",
-                            "legendPosition": "NONE_LEGEND",
+                            "legendPosition": "RIGHT_LEGEND",
                             "axis": [
                                 {"position": "BOTTOM_AXIS", "title": "Memory (bytes)"},
                                 {"position": "LEFT_AXIS", "title": "Namespace"},
