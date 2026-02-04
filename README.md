@@ -4,7 +4,7 @@
 
 > **Kubernetes resource monitoring made simple.** Scan CPU, memory, and disk usage across all namespaces and nodes. Export human-readable CSV and Google Sheets with scaling recommendations—perfect for **capacity planning**, **cost optimization**, and **Kubernetes cluster visibility**.
 
-A lightweight, **read-only** Kubernetes tool that runs as a CronJob on **AKS**, **GKE**, **EKS**, or any Kubernetes cluster. Get a single append-only CSV (and optional Google Sheet) with **human-readable values** (e.g. 256 Mi, 3.1 cores, 38.9%) and actionable recommendations for scale up/down and limit tuning.
+A lightweight, **read-only** Kubernetes tool that runs as a CronJob on **AKS**, **GKE**, **EKS**, or any Kubernetes cluster. Get a single append-only CSV (raw values for parsing) and optional Google Sheet with **one new tab per run** (**Run &lt;timestamp&gt;** for historical data) and a **Dashboard** tab that visualizes the latest run.
 
 ---
 
@@ -65,9 +65,9 @@ A lightweight, **read-only** Kubernetes tool that runs as a CronJob on **AKS**, 
 
 ## 📊 Output
 
-- 📄 **CSV (always)** — Single file: **`all-resources.csv`**. Each run **appends** rows with a **Scan Date** column. One row per container per scan. Columns use human-readable headers (e.g. "Memory Request", "Node CPU Util %") and values (e.g. "256 Mi", "3.1 cores", "38.9%").
+- 📄 **CSV (always)** — Single file: **`all-resources.csv`**. Each run **appends** rows with a **scan_date** column. Raw column names (e.g. `cpu_request`, `memory_limit`, `node_cpu_util_pct`) and values (e.g. `100m`, `128Mi`, `38.9`) for easy parsing and tools.
 
-- 📋 **Google Sheet (optional)** — One sheet **"All Resources"** with **metrics vertical, data horizontal**: **rows = metrics** (Scan Date, CPU Request, CPU Limit, Memory Request, Memory Limit, Status, Node %, Recommendations), **columns = containers** (namespace / pod / container). Compare containers side-by-side; each run overwrites with the latest snapshot.
+- 📋 **Google Sheet (optional)** — **One new tab per run** (historical data) + **Dashboard:** Each run creates **"Run &lt;timestamp&gt;"** with that run’s summary tables; only the last **N** run tabs are kept (configurable). **"All Resources"** holds the latest container-level metrics. **"Dashboard"** shows KPIs and charts for the **latest** run; you can open any **Run &lt;timestamp&gt;** tab to compare history.
 
 ---
 
@@ -140,6 +140,7 @@ See **Configuration** and `chart/values.yaml` for all options.
 | `POD_SCANNER_CLUSTER_NAME` | Cluster identifier (for multi-cluster CSV/Sheet) | (empty) |
 | `POD_SCANNER_UPDATE_GOOGLE_SHEET` | Set to `true`/`1` to update Google Sheet | unset |
 | `POD_SCANNER_SHEET_ID` | Google Sheet ID (or use secret) | - |
+| `POD_SCANNER_SHEET_RUN_TABS_KEEP` | Number of **Run &lt;timestamp&gt;** tabs to keep (older ones deleted); use for historical data | `10` |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON | - |
 | `POD_SCANNER_UTIL_SCALE_UP_PCT` | Utilization % above which to recommend scale up | `75` |
 | `POD_SCANNER_UTIL_SCALE_DOWN_PCT` | Utilization % below which to recommend scale down | `25` |
@@ -167,7 +168,7 @@ RBAC: the chart creates a **ClusterRole** and **ClusterRoleBinding** (read-only)
    helm upgrade pod-resource-scanner ./chart -n pod-resource-scanner --set googleSheet.enabled=true
    ```
 
-The job appends to `all-resources.csv` and updates the **All Resources** sheet: metrics as rows, containers as columns so you can compare containers horizontally.
+The job appends to `all-resources.csv` and updates the sheet: **All Resources** (metrics × containers for latest run), a new **Run &lt;timestamp&gt;** tab each run (namespace, node utilization, recommendations—keeps last N for history), and **Dashboard** (KPIs and charts for the latest run). Set `POD_SCANNER_SHEET_RUN_TABS_KEEP` (default 10) to control how many run tabs are retained.
 
 ---
 

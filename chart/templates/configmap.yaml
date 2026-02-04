@@ -11,3 +11,4 @@ data:
   POD_SCANNER_UTIL_SCALE_UP_PCT: {{ .Values.config.utilScaleUpPct | quote }}
   POD_SCANNER_UTIL_SCALE_DOWN_PCT: {{ .Values.config.utilScaleDownPct | quote }}
   POD_SCANNER_RETENTION_DAYS: {{ .Values.config.retentionDays | quote }}
+  POD_SCANNER_SHEET_RUN_TABS_KEEP: {{ .Values.config.runTabsKeep | default "10" | quote }}

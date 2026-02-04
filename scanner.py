@@ -515,7 +515,7 @@ def write_csv(
     output_dir: Path,
     run_ts: str,
 ) -> None:
-    """Append combined data (with scan_date) to the single cumulative CSV; human-readable values and headers."""
+    """Append combined data (with scan_date) to the single cumulative CSV; raw headers and values for parsing."""
     output_dir.mkdir(parents=True, exist_ok=True)
     combined = _build_combined_rows(rows, summary, node_util, recommendations)
     for r in combined:
@@ -523,12 +523,10 @@ def write_csv(
     path = output_dir / OUTPUT_CSV_NAME
     file_exists = path.exists()
     with open(path, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
+        w = csv.DictWriter(f, fieldnames=HISTORY_CSV_HEADERS, extrasaction="ignore")
         if not file_exists:
-            writer.writerow(DISPLAY_HEADERS)
-        for r in combined:
-            formatted = _format_row_for_display(r)
-            writer.writerow([formatted.get(k, "") for k in HISTORY_CSV_HEADERS])
+            w.writeheader()
+        w.writerows(combined)
     LOG.info("Appended %s rows to %s (scan_date=%s)", len(combined), path, run_ts)
 
 
@@ -601,6 +599,366 @@ def update_google_sheet(
     LOG.info(
         "Updated sheet 'All Resources' (metrics vertical, containers horizontal): %s metrics × %s containers (scan_date=%s)",
         num_metrics, num_containers, run_ts,
+    )
+
+    _update_dashboard_sheet(sh, summary, node_util, recommendations, run_ts)
+
+
+def _dashboard_get_existing_chart_ids(sh, dashboard_sheet_id: int) -> List[int]:
+    """Fetch chart IDs embedded in the Dashboard sheet so we can remove them before re-adding."""
+    import urllib.request
+
+    creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if not creds_path or not Path(creds_path).exists():
+        return []
+    from google.oauth2.service_account import Credentials
+    from google.auth.transport.requests import Request as AuthRequest
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
+    creds.refresh(AuthRequest())
+    token = creds.token
+    spreadsheet_id = sh.id
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}"
+        "?fields=sheets(properties(sheetId,title),charts)"
+    )
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = __import__("json").loads(resp.read().decode())
+    except Exception:
+        return []
+    chart_ids: List[int] = []
+    for sheet in data.get("sheets", []):
+        if sheet.get("properties", {}).get("sheetId") == dashboard_sheet_id:
+            for ch in sheet.get("charts", []):
+                cid = ch.get("chartId")
+                if cid is not None:
+                    chart_ids.append(cid)
+            break
+    return chart_ids
+
+
+# Option B: one new tab per run (historical data); Dashboard visualizes the latest run. Keep last N run tabs.
+_RUN_SHEET_PREFIX = "Run "
+_DASHBOARD_NS_HEADER_ROW = 2   # 0-based: row 2 = headers, row 3+ = data
+_DASHBOARD_NS_END_ROW = 52     # 0-based endRowIndex for namespace table
+_DASHBOARD_NODE_END_ROW = 52
+_DASHBOARD_REC_END_ROW = 25
+
+
+def _update_dashboard_sheet(
+    sh, summary: List[dict], node_util: List[dict], recommendations: List[dict], run_ts: str
+) -> None:
+    """Create a new 'Run <timestamp>' tab each run; keep last N run tabs; Dashboard visualizes the latest (historical data)."""
+    run_tab_title = _RUN_SHEET_PREFIX + run_ts
+    data_ws = sh.add_worksheet(run_tab_title, rows=60, cols=12)
+    data_sheet_id = data_ws.id
+    max_ns_rows = 50
+    max_node_rows = 50
+    max_rec_rows = 25
+
+    # Row 0: last scan timestamp (referenced by Dashboard KPIs)
+    data_ws.update("A1", [["Last scan: " + run_ts]], value_input_option="RAW")
+    # Namespace block: A2 = title, A3:C3 = headers, A4:C52 = data
+    ns_sorted = sorted(summary, key=lambda x: (str(x.get("cluster", "")), str(x.get("namespace", ""))))
+    ns_rows = [["By Namespace"], ["Namespace", "Pod Count", "Container Count"]]
+    for s in ns_sorted[: max_ns_rows - 1]:
+        ns_rows.append([
+            str(s.get("namespace", "")),
+            s.get("pod_count", ""),
+            s.get("container_count", ""),
+        ])
+    while len(ns_rows) < 2 + max_ns_rows:
+        ns_rows.append(["", "", ""])
+    data_ws.update("A2", ns_rows, value_input_option="RAW")
+    # Node utilization: E2 = title, E3:H3 = headers, E4:H52 = data
+    node_sorted = sorted(node_util, key=lambda x: (str(x.get("cluster", "")), str(x.get("node", ""))))
+    node_rows = [["Node utilization (%)"], ["Node", "CPU %", "Memory %", "Disk %"]]
+    for nu in node_sorted[: max_node_rows - 1]:
+        node_rows.append([
+            str(nu.get("node", "")),
+            nu.get("cpu_util_pct", ""),
+            nu.get("memory_util_pct", ""),
+            nu.get("disk_util_pct", ""),
+        ])
+    while len(node_rows) < 1 + max_node_rows:
+        node_rows.append(["", "", "", ""])
+    data_ws.update("E2", node_rows, value_input_option="RAW")
+    # Recommendations: J2 = title, J3:K3 = headers, J4:K25 = data
+    rec_by_type: Dict[str, int] = {}
+    for r in recommendations:
+        t = str(r.get("type") or "other")
+        rec_by_type[t] = rec_by_type.get(t, 0) + 1
+    rec_rows = [["Recommendations by type"], ["Type", "Count"]]
+    for t, count in sorted(rec_by_type.items())[: max_rec_rows - 1]:
+        rec_rows.append([t, count])
+    while len(rec_rows) < 1 + max_rec_rows:
+        rec_rows.append(["", ""])
+    data_ws.update("J2", rec_rows, value_input_option="RAW")
+
+    # Prune old run tabs: keep only the last N (so we have historical data but not hundreds of tabs)
+    keep_n = int(os.environ.get("POD_SCANNER_SHEET_RUN_TABS_KEEP", "10"))
+    all_run_sheets = [data_ws] + [
+        w for w in sh.worksheets()
+        if w.title.startswith(_RUN_SHEET_PREFIX) and w.id != data_ws.id
+    ]
+    all_run_sheets.sort(key=lambda w: w.title)  # oldest first (ISO timestamp sorts correctly)
+    to_delete = all_run_sheets[: max(0, len(all_run_sheets) - keep_n)]
+    requests: List[dict] = []
+    for ws in to_delete:
+        requests.append({"deleteSheet": {"sheetId": ws.id}})
+
+    # --- Dashboard tab: title, KPI cards, and charts (all reference latest run tab) ---
+    try:
+        dash_ws = sh.worksheet("Dashboard")
+    except Exception:
+        dash_ws = sh.add_worksheet("Dashboard", rows=70, cols=14)
+    dashboard_sheet_id = dash_ws.id
+
+    # Dashboard formulas reference the new run tab by name (escape single quote in sheet name)
+    _dn = "'" + run_tab_title.replace("'", "''") + "'!"
+    dash_title = "Pod Resource Scanner — Dashboard"
+    kpi_rows = [
+        [dash_title, "", "", "", "", "=" + _dn + "A1"],
+        ["Total Pods", "=SUM(" + _dn + "B4:B52)", "Total Containers", "=SUM(" + _dn + "C4:C52)", "Nodes", "=COUNTA(" + _dn + "E4:E52)"],
+        ["Recommendations", "=SUM(" + _dn + "K4:K25)", "Avg Node CPU %", "=IFERROR(ROUND(AVERAGE(" + _dn + "F4:F52),1)&\"%\",\"—\")", "Avg Memory %", "=IFERROR(ROUND(AVERAGE(" + _dn + "G4:G52),1)&\"%\",\"—\")"],
+    ]
+    dash_ws.clear()
+    dash_ws.update("A1", kpi_rows, value_input_option="USER_ENTERED")
+
+    # Delete existing charts on Dashboard only
+    chart_ids = _dashboard_get_existing_chart_ids(sh, dashboard_sheet_id)
+    for cid in chart_ids:
+        requests.append({"deleteEmbeddedObject": {"objectId": cid}})
+
+    # Charts: data from run tab (data_sheet_id), positioned on Dashboard (dashboard_sheet_id)
+    # Place charts below KPIs: anchor row 5
+    ns_end_row = _DASHBOARD_NS_END_ROW
+    requests.append({
+        "addChart": {
+            "chart": {
+                "spec": {
+                    "title": "Pods by Namespace",
+                    "basicChart": {
+                        "chartType": "COLUMN",
+                        "legendPosition": "BOTTOM_LEGEND",
+                        "axis": [
+                            {"position": "BOTTOM_AXIS", "title": "Namespace"},
+                            {"position": "LEFT_AXIS", "title": "Count"},
+                        ],
+                        "domains": [{
+                            "domain": {
+                                "sourceRange": {
+                                    "sources": [{
+                                        "sheetId": data_sheet_id,
+                                        "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
+                                        "endRowIndex": ns_end_row,
+                                        "startColumnIndex": 0,
+                                        "endColumnIndex": 1,
+                                    }],
+                                },
+                            },
+                        }],
+                        "series": [
+                            {
+                                "series": {
+                                    "sourceRange": {
+                                        "sources": [{
+                                            "sheetId": data_sheet_id,
+                                            "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
+                                            "endRowIndex": ns_end_row,
+                                            "startColumnIndex": 1,
+                                            "endColumnIndex": 2,
+                                        }],
+                                    },
+                                },
+                                "targetAxis": "LEFT_AXIS",
+                            },
+                            {
+                                "series": {
+                                    "sourceRange": {
+                                        "sources": [{
+                                            "sheetId": data_sheet_id,
+                                            "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
+                                            "endRowIndex": ns_end_row,
+                                            "startColumnIndex": 2,
+                                            "endColumnIndex": 3,
+                                        }],
+                                    },
+                                },
+                                "targetAxis": "LEFT_AXIS",
+                            },
+                        ],
+                        "headerCount": 1,
+                    },
+                },
+                "position": {
+                    "overlayPosition": {
+                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 5, "columnIndex": 0},
+                        "offsetXPixels": 10,
+                        "offsetYPixels": 0,
+                        "widthPixels": 380,
+                        "heightPixels": 280,
+                    },
+                },
+            },
+        },
+    })
+
+    node_end_row = _DASHBOARD_NODE_END_ROW
+    requests.append({
+        "addChart": {
+            "chart": {
+                "spec": {
+                    "title": "Node utilization (%)",
+                    "basicChart": {
+                        "chartType": "BAR",
+                        "legendPosition": "RIGHT_LEGEND",
+                        "axis": [
+                            {"position": "BOTTOM_AXIS", "title": "Utilization %"},
+                            {"position": "LEFT_AXIS", "title": "Node"},
+                        ],
+                        "domains": [{
+                            "domain": {
+                                "sourceRange": {
+                                    "sources": [{
+                                        "sheetId": data_sheet_id,
+                                        "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
+                                        "endRowIndex": node_end_row,
+                                        "startColumnIndex": 4,
+                                        "endColumnIndex": 5,
+                                    }],
+                                },
+                            },
+                        }],
+                        "series": [
+                            {
+                                "series": {
+                                    "sourceRange": {
+                                        "sources": [{
+                                            "sheetId": data_sheet_id,
+                                            "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
+                                            "endRowIndex": node_end_row,
+                                            "startColumnIndex": 5,
+                                            "endColumnIndex": 6,
+                                        }],
+                                    },
+                                },
+                                "targetAxis": "BOTTOM_AXIS",
+                            },
+                            {
+                                "series": {
+                                    "sourceRange": {
+                                        "sources": [{
+                                            "sheetId": data_sheet_id,
+                                            "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
+                                            "endRowIndex": node_end_row,
+                                            "startColumnIndex": 6,
+                                            "endColumnIndex": 7,
+                                        }],
+                                    },
+                                },
+                                "targetAxis": "BOTTOM_AXIS",
+                            },
+                            {
+                                "series": {
+                                    "sourceRange": {
+                                        "sources": [{
+                                            "sheetId": data_sheet_id,
+                                            "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
+                                            "endRowIndex": node_end_row,
+                                            "startColumnIndex": 7,
+                                            "endColumnIndex": 8,
+                                        }],
+                                    },
+                                },
+                                "targetAxis": "BOTTOM_AXIS",
+                            },
+                        ],
+                        "headerCount": 1,
+                    },
+                },
+                "position": {
+                    "overlayPosition": {
+                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 5, "columnIndex": 5},
+                        "offsetXPixels": 10,
+                        "offsetYPixels": 0,
+                        "widthPixels": 400,
+                        "heightPixels": 280,
+                    },
+                },
+            },
+        },
+    })
+
+    rec_end_row = min(2 + len(rec_by_type) + 1, _DASHBOARD_REC_END_ROW)
+    pie_spec = {
+        "title": "Recommendations by type",
+        "pieChart": {
+            "legendPosition": "RIGHT_LEGEND",
+            "domain": {
+                "sourceRange": {
+                    "sources": [{
+                        "sheetId": data_sheet_id,
+                        "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
+                        "endRowIndex": rec_end_row,
+                        "startColumnIndex": 9,
+                        "endColumnIndex": 10,
+                    }],
+                },
+            },
+            "series": {
+                "sourceRange": {
+                    "sources": [{
+                        "sheetId": data_sheet_id,
+                        "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
+                        "endRowIndex": rec_end_row,
+                        "startColumnIndex": 10,
+                        "endColumnIndex": 11,
+                    }],
+                },
+            },
+        },
+    }
+    requests.append({
+        "addChart": {
+            "chart": {
+                "spec": pie_spec,
+                "position": {
+                    "overlayPosition": {
+                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 5, "columnIndex": 10},
+                        "offsetXPixels": 10,
+                        "offsetYPixels": 0,
+                        "widthPixels": 320,
+                        "heightPixels": 280,
+                    },
+                },
+            },
+        },
+    })
+
+    # Bold header row on run tab for tables
+    for start_col, end_col in [(0, 3), (4, 8), (9, 11)]:
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": data_sheet_id,
+                    "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
+                    "endRowIndex": _DASHBOARD_NS_HEADER_ROW + 1,
+                    "startColumnIndex": start_col,
+                    "endColumnIndex": end_col,
+                },
+                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                "fields": "userEnteredFormat.textFormat.bold",
+            },
+        })
+
+    if requests:
+        sh.batch_update({"requests": requests})
+    LOG.info(
+        "Added run tab '%s', pruned to last %s run tabs, updated Dashboard (KPIs + charts → latest run)",
+        run_tab_title, keep_n,
     )
 
 

@@ -77,6 +77,8 @@ config:
   utilScaleDownPct: "25"
   # -- Delete snapshot CSVs older than N days (0 = keep all). History CSV is never deleted.
   retentionDays: "0"
+  # -- Number of "Run <timestamp>" Google Sheet tabs to keep (older run tabs are deleted). Only used when googleSheet.enabled is true.
+  runTabsKeep: "10"
 
 # -- Google Sheet integration (optional)
 googleSheet:
