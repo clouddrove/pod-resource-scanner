@@ -681,7 +681,6 @@ def _update_dashboard_sheet(
     run_tab_title = _RUN_SHEET_PREFIX + run_ts
     data_ws = sh.add_worksheet(run_tab_title, rows=115, cols=23)
     data_sheet_id = data_ws.id
-    ns_totals: Dict[str, Dict[str, Any]] = {}
     max_ns_rows = 50
     max_node_data = min(_RUN_NODE_MAX_DATA, max(1, len(node_util)))
 
@@ -752,24 +751,6 @@ def _update_dashboard_sheet(
             ])
         data_ws.update(range_name="P1", values=detail_rows, value_input_option="RAW")
 
-    # Resource totals by namespace (CPU / memory requested) for Dashboard charts and pod compare
-    if combined_raw:
-        for r in combined_raw:
-            ns = str(r.get("namespace") or "").strip()
-            if ns not in ns_totals:
-                ns_totals[ns] = {"cpu_m": 0.0, "mem_bytes": 0.0}
-            ns_totals[ns]["cpu_m"] += quantity_to_millicores(r.get("cpu_request", ""))
-            ns_totals[ns]["mem_bytes"] += quantity_to_bytes(r.get("memory_request", ""))
-        res_header = ["Resource totals by namespace (top by CPU)", "", ""]
-        res_cols = ["Namespace", "Total CPU (m)", "Total Memory (Gi)"]
-        res_rows = [res_header, res_cols]
-        for ns, tot in sorted(ns_totals.items(), key=lambda x: -x[1]["cpu_m"])[:50]:
-            mem_gi = round(tot["mem_bytes"] / (1024 ** 3), 2)
-            res_rows.append([ns, round(tot["cpu_m"]), mem_gi])
-        while len(res_rows) < 2 + 50:
-            res_rows.append(["", "", ""])
-        data_ws.update(range_name="A54", values=res_rows, value_input_option="RAW")
-
     # Freeze top 2 rows and first 4 columns on run tab so headers stay visible when scrolling
     requests: List[dict] = []
     requests.append({
@@ -794,6 +775,21 @@ def _update_dashboard_sheet(
             "fields": "pixelSize",
         },
     })
+    # Add basic filter on Container details (P2:W) so users can filter/sort by Namespace, Pod, etc.
+    if formatted_combined:
+        requests.append({
+            "setBasicFilter": {
+                "filter": {
+                    "range": {
+                        "sheetId": data_sheet_id,
+                        "startRowIndex": 1,
+                        "endRowIndex": 115,
+                        "startColumnIndex": 15,
+                        "endColumnIndex": 23,
+                    },
+                },
+            },
+        })
 
     # Prune old run tabs: keep only the last N (so we have historical data but not hundreds of tabs)
     keep_n = int(os.environ.get("POD_SCANNER_SHEET_RUN_TABS_KEEP", "10"))
@@ -807,13 +803,12 @@ def _update_dashboard_sheet(
         requests.append({"deleteSheet": {"sheetId": ws.id}})
     # Runs we keep (newest last); for historical comparison we want newest first
     runs_kept = all_run_sheets[-keep_n:]
-    run_titles_newest_first = [w.title for w in reversed(runs_kept)]
 
     # --- Dashboard tab: title, KPI cards, Top 10, historical comparison, and charts ---
     try:
         dash_ws = sh.worksheet("Dashboard")
     except Exception:
-        dash_ws = sh.add_worksheet("Dashboard", rows=95, cols=14)
+        dash_ws = sh.add_worksheet("Dashboard", rows=25, cols=14)
     dashboard_sheet_id = dash_ws.id
 
     # Dashboard formulas reference the new run tab by name (escape single quote in sheet name)
@@ -821,42 +816,30 @@ def _update_dashboard_sheet(
     dash_title = "Pod Resource Scanner — Dashboard"
     _node_end = str(3 + _RUN_NODE_MAX_DATA)   # 1-based row after last node data (title+header+10)
     _rec_end = str(3 + _RUN_REC_TYPE_MAX_DATA)
+
+    # Cluster totals: CPU and memory requested vs allocatable (from node_util)
+    total_cpu_alloc = sum(quantity_to_millicores(n.get("cpu_allocatable", "")) for n in node_util if n.get("node") != "_unscheduled_")
+    total_cpu_req = sum(n.get("cpu_requested_millicores", 0) for n in node_util)
+    total_mem_alloc = sum(quantity_to_bytes(n.get("memory_allocatable", "")) for n in node_util if n.get("node") != "_unscheduled_")
+    total_mem_req = sum(n.get("memory_requested_bytes", 0) for n in node_util)
+    cpu_pct = round(100 * total_cpu_req / total_cpu_alloc, 1) if total_cpu_alloc else 0
+    mem_pct = round(100 * total_mem_req / total_mem_alloc, 1) if total_mem_alloc else 0
+    mem_req_gi = round(total_mem_req / (1024 ** 3), 2)
+    mem_alloc_gi = round(total_mem_alloc / (1024 ** 3), 2)
+
+    # Dashboard: explainable at a glance — title, explanation, KPIs, then CPU/Memory calculation
     kpi_rows = [
-        [dash_title, "", "", "", "", "Last run: "],
-        ["Total Pods", "=SUM(" + _dn + "B4:B52)", "Total Containers", "=SUM(" + _dn + "C4:C52)", "Nodes", "=COUNTA(" + _dn + "E4:E" + _node_end + ")"],
-        ["Recommendations", "=SUM(" + _dn + "K4:K" + _rec_end + ")", "Avg Node CPU %", "=IFERROR(ROUND(AVERAGE(" + _dn + "F4:F" + _node_end + "),1)&\"%\",\"—\")", "Avg Memory %", "=IFERROR(ROUND(AVERAGE(" + _dn + "G4:G" + _node_end + "),1)&\"%\",\"—\")"],
-        ["Total CPU requested (m)", "=SUM(" + _dn + "B56:B105)", "Total Memory (Gi)", "=IFERROR(ROUND(SUM(" + _dn + "C56:C105), 2)&\" Gi\",\"—\")", "Avg Disk %", "=IFERROR(ROUND(AVERAGE(" + _dn + "H4:H" + _node_end + "),1)&\"%\",\"—\")"],
-        ["Recommendations = limit/request suggestions. See run tab for full container list.", "", "Top 10 namespaces by CPU:", "", "", "=" + _dn + "A1"],
+        [dash_title, "", "", "", "Last updated: ", "=" + _dn + "A1"],
+        ["Summary of the latest scan. Open a Run tab for full details and container-level recommendations.", "", "", "", "", ""],
+        ["Pods", "=SUM(" + _dn + "B4:B52)", "Containers", "=SUM(" + _dn + "C4:C52)", "Nodes", "=COUNTA(" + _dn + "E4:E" + _node_end + ")"],
+        ["Recommendations to review", "=SUM(" + _dn + "K4:K" + _rec_end + ")", "", "", "", ""],
+        ["CPU (cluster)", f"requested: {int(total_cpu_req)} m", f"allocatable: {int(total_cpu_alloc)} m", f"usage: {cpu_pct}%", "", ""],
+        ["Memory (cluster)", f"requested: {mem_req_gi} Gi", f"allocatable: {mem_alloc_gi} Gi", f"usage: {mem_pct}%", "", ""],
     ]
-    # Top 10 namespaces by CPU (table: Rank, Namespace, CPU (m))
-    top10_header = ["Rank", "Namespace", "CPU (m)"]
-    top10_rows = [top10_header]
-    for i in range(10):
-        r = 56 + i  # run tab data rows 56-65
-        top10_rows.append([i + 1, "=" + _dn + "A" + str(r), "=" + _dn + "B" + str(r)])
     dash_ws.clear()
-    # Extra blank row between KPIs and Top 10 table to reduce clutter
-    dash_ws.update(range_name="A1", values=kpi_rows + [[]] + [[]] + top10_rows, value_input_option="USER_ENTERED")
+    dash_ws.update(range_name="A1", values=kpi_rows, value_input_option="USER_ENTERED")
 
-    # Historical comparison: one row per run tab so you can compare across runs
-    comparison_header = ["Run", "Total Pods", "Total Containers", "Total CPU (m)", "Total Memory (Gi)", "Recommendations"]
-    comparison_rows = [
-        ["Historical comparison (last " + str(keep_n) + " runs) — click Run tab to open", "", "", "", "", ""],
-        comparison_header,
-    ]
-    for title in run_titles_newest_first:
-        ref = "'" + title.replace("'", "''") + "'!"
-        comparison_rows.append([
-            title,
-            "=SUM(" + ref + "B4:B52)",
-            "=SUM(" + ref + "C4:C52)",
-            "=SUM(" + ref + "B56:B105)",
-            "=IFERROR(ROUND(SUM(" + ref + "C56:C105), 2)&\" Gi\",\"—\")",
-            "=SUM(" + ref + "K4:K" + _rec_end + ")",
-        ])
-    dash_ws.update(range_name="E6", values=comparison_rows, value_input_option="USER_ENTERED")
-
-    # Dashboard: colored KPI rows (title = blue with white text, then alternating row colors)
+    # Dashboard: title row; explainer row; KPI rows; CPU/Memory rows (light background)
     _d = dashboard_sheet_id
     requests.append({
         "repeatCell": {
@@ -865,7 +848,7 @@ def _update_dashboard_sheet(
             "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold,userEnteredFormat.textFormat.foregroundColor,userEnteredFormat.textFormat.fontSize",
         },
     })
-    for row, color_key in [(1, "dash_row1"), (2, "dash_row2"), (3, "dash_row3"), (4, "dash_row4"), (5, "dash_row4")]:
+    for row, color_key in [(1, "dash_row4"), (2, "dash_row1"), (3, "dash_row2"), (4, "dash_row3"), (5, "dash_row2"), (6, "dash_row3")]:
         requests.append({
             "repeatCell": {
                 "range": {"sheetId": _d, "startRowIndex": row, "endRowIndex": row + 1, "startColumnIndex": 0, "endColumnIndex": 6},
@@ -873,353 +856,11 @@ def _update_dashboard_sheet(
                 "fields": "userEnteredFormat.backgroundColor",
             },
         })
-    # Top 10 table header (row 7 after extra blank row)
-    requests.append({
-        "repeatCell": {
-            "range": {"sheetId": _d, "startRowIndex": 7, "endRowIndex": 8, "startColumnIndex": 0, "endColumnIndex": 3},
-            "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["light_gray"], "textFormat": {"bold": True}}},
-            "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold",
-        },
-    })
-    # Historical comparison: title row (E6) and header row (E7)
-    requests.append({
-        "repeatCell": {
-            "range": {"sheetId": _d, "startRowIndex": 5, "endRowIndex": 6, "startColumnIndex": 4, "endColumnIndex": 10},
-            "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["light_purple"], "textFormat": {"bold": True}}},
-            "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold",
-        },
-    })
-    requests.append({
-        "repeatCell": {
-            "range": {"sheetId": _d, "startRowIndex": 6, "endRowIndex": 7, "startColumnIndex": 4, "endColumnIndex": 10},
-            "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["purple_header"], "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}}},
-            "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold,userEnteredFormat.textFormat.foregroundColor",
-        },
-    })
 
     # Delete existing charts on Dashboard only
     chart_ids = _dashboard_get_existing_chart_ids(sh, dashboard_sheet_id)
     for cid in chart_ids:
         requests.append({"deleteEmbeddedObject": {"objectId": cid}})
-
-    # Charts: data from run tab (data_sheet_id), positioned on Dashboard (dashboard_sheet_id)
-    # Place charts below KPIs: anchor row 5
-    ns_end_row = _DASHBOARD_NS_END_ROW
-    # Horizontal bar so namespace labels are readable (no truncation)
-    requests.append({
-        "addChart": {
-            "chart": {
-                "spec": {
-                    "title": "Pods by Namespace",
-                    "basicChart": {
-                        "chartType": "BAR",
-                        "legendPosition": "RIGHT_LEGEND",
-                        "axis": [
-                            {"position": "BOTTOM_AXIS", "title": "Count"},
-                            {"position": "LEFT_AXIS", "title": "Namespace"},
-                        ],
-                        "domains": [{
-                            "domain": {
-                                "sourceRange": {
-                                    "sources": [{
-                                        "sheetId": data_sheet_id,
-                                        "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
-                                        "endRowIndex": ns_end_row,
-                                        "startColumnIndex": 0,
-                                        "endColumnIndex": 1,
-                                    }],
-                                },
-                            },
-                        }],
-                        "series": [
-                            {
-                                "series": {
-                                    "sourceRange": {
-                                        "sources": [{
-                                            "sheetId": data_sheet_id,
-                                            "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
-                                            "endRowIndex": ns_end_row,
-                                            "startColumnIndex": 1,
-                                            "endColumnIndex": 2,
-                                        }],
-                                    },
-                                },
-                                "targetAxis": "BOTTOM_AXIS",
-                            },
-                            {
-                                "series": {
-                                    "sourceRange": {
-                                        "sources": [{
-                                            "sheetId": data_sheet_id,
-                                            "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
-                                            "endRowIndex": ns_end_row,
-                                            "startColumnIndex": 2,
-                                            "endColumnIndex": 3,
-                                        }],
-                                    },
-                                },
-                                "targetAxis": "BOTTOM_AXIS",
-                            },
-                        ],
-                        "headerCount": 1,
-                    },
-                },
-                "position": {
-                    "overlayPosition": {
-                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 20, "columnIndex": 0},
-                        "offsetXPixels": 10,
-                        "offsetYPixels": 0,
-                        "widthPixels": 400,
-                        "heightPixels": 320,
-                    },
-                },
-            },
-        },
-    })
-
-    node_end_row = _DASHBOARD_NODE_END_ROW  # compact: title+header+up to 10 node rows
-    requests.append({
-        "addChart": {
-            "chart": {
-                "spec": {
-                    "title": "Node utilization (%)",
-                    "basicChart": {
-                        "chartType": "BAR",
-                        "legendPosition": "RIGHT_LEGEND",
-                        "axis": [
-                            {"position": "BOTTOM_AXIS", "title": "Utilization %"},
-                            {"position": "LEFT_AXIS", "title": "Node"},
-                        ],
-                        "domains": [{
-                            "domain": {
-                                "sourceRange": {
-                                    "sources": [{
-                                        "sheetId": data_sheet_id,
-                                        "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
-                                        "endRowIndex": node_end_row,
-                                        "startColumnIndex": 4,
-                                        "endColumnIndex": 5,
-                                    }],
-                                },
-                            },
-                        }],
-                        "series": [
-                            {
-                                "series": {
-                                    "sourceRange": {
-                                        "sources": [{
-                                            "sheetId": data_sheet_id,
-                                            "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
-                                            "endRowIndex": node_end_row,
-                                            "startColumnIndex": 5,
-                                            "endColumnIndex": 6,
-                                        }],
-                                    },
-                                },
-                                "targetAxis": "BOTTOM_AXIS",
-                            },
-                            {
-                                "series": {
-                                    "sourceRange": {
-                                        "sources": [{
-                                            "sheetId": data_sheet_id,
-                                            "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
-                                            "endRowIndex": node_end_row,
-                                            "startColumnIndex": 6,
-                                            "endColumnIndex": 7,
-                                        }],
-                                    },
-                                },
-                                "targetAxis": "BOTTOM_AXIS",
-                            },
-                            {
-                                "series": {
-                                    "sourceRange": {
-                                        "sources": [{
-                                            "sheetId": data_sheet_id,
-                                            "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
-                                            "endRowIndex": node_end_row,
-                                            "startColumnIndex": 7,
-                                            "endColumnIndex": 8,
-                                        }],
-                                    },
-                                },
-                                "targetAxis": "BOTTOM_AXIS",
-                            },
-                        ],
-                        "headerCount": 1,
-                    },
-                },
-                "position": {
-                    "overlayPosition": {
-                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 20, "columnIndex": 5},
-                        "offsetXPixels": 10,
-                        "offsetYPixels": 0,
-                        "widthPixels": 400,
-                        "heightPixels": 320,
-                    },
-                },
-            },
-        },
-    })
-
-    rec_end_row = min(3 + len(rec_sorted), _DASHBOARD_REC_END_ROW)  # title+header+data
-    pie_spec = {
-        "title": "Recommendations by type",
-        "pieChart": {
-            "legendPosition": "RIGHT_LEGEND",
-            "domain": {
-                "sourceRange": {
-                    "sources": [{
-                        "sheetId": data_sheet_id,
-                        "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
-                        "endRowIndex": rec_end_row,
-                        "startColumnIndex": 9,
-                        "endColumnIndex": 10,
-                    }],
-                },
-            },
-            "series": {
-                "sourceRange": {
-                    "sources": [{
-                        "sheetId": data_sheet_id,
-                        "startRowIndex": _DASHBOARD_NS_HEADER_ROW,
-                        "endRowIndex": rec_end_row,
-                        "startColumnIndex": 10,
-                        "endColumnIndex": 11,
-                    }],
-                },
-            },
-        },
-    }
-    requests.append({
-        "addChart": {
-            "chart": {
-                "spec": pie_spec,
-                "position": {
-                    "overlayPosition": {
-                        "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 20, "columnIndex": 10},
-                        "offsetXPixels": 10,
-                        "offsetYPixels": 0,
-                        "widthPixels": 320,
-                        "heightPixels": 320,
-                    },
-                },
-            },
-        },
-    })
-
-    # Resource charts (from Run tab "Resource totals by namespace" block at A54)
-    _res_start, _res_end = 55, 75  # 0-based: header row 55, data 56-74 (top 19)
-    if combined_raw and ns_totals:
-        requests.append({
-            "addChart": {
-                "chart": {
-                    "spec": {
-                        "title": "CPU requested by namespace (top 20)",
-                        "basicChart": {
-                            "chartType": "BAR",
-                            "legendPosition": "RIGHT_LEGEND",
-                            "axis": [
-                                {"position": "BOTTOM_AXIS", "title": "CPU (millicores)"},
-                                {"position": "LEFT_AXIS", "title": "Namespace"},
-                            ],
-                            "domains": [{
-                                "domain": {
-                                    "sourceRange": {
-                                        "sources": [{
-                                            "sheetId": data_sheet_id,
-                                            "startRowIndex": _res_start,
-                                            "endRowIndex": _res_end,
-                                            "startColumnIndex": 0,
-                                            "endColumnIndex": 1,
-                                        }],
-                                    },
-                                },
-                            }],
-                            "series": [{
-                                "series": {
-                                    "sourceRange": {
-                                        "sources": [{
-                                            "sheetId": data_sheet_id,
-                                            "startRowIndex": _res_start,
-                                            "endRowIndex": _res_end,
-                                            "startColumnIndex": 1,
-                                            "endColumnIndex": 2,
-                                        }],
-                                    },
-                                },
-                                "targetAxis": "BOTTOM_AXIS",
-                            }],
-                            "headerCount": 1,
-                        },
-                    },
-                    "position": {
-                        "overlayPosition": {
-                            "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 44, "columnIndex": 0},
-                            "offsetXPixels": 10,
-                            "offsetYPixels": 0,
-                            "widthPixels": 450,
-                            "heightPixels": 320,
-                        },
-                    },
-                },
-            },
-        })
-        requests.append({
-            "addChart": {
-                "chart": {
-                    "spec": {
-                        "title": "Memory requested by namespace (top 20)",
-                        "basicChart": {
-                            "chartType": "BAR",
-                            "legendPosition": "RIGHT_LEGEND",
-                            "axis": [
-                                {"position": "BOTTOM_AXIS", "title": "Memory (Gi)"},
-                                {"position": "LEFT_AXIS", "title": "Namespace"},
-                            ],
-                            "domains": [{
-                                "domain": {
-                                    "sourceRange": {
-                                        "sources": [{
-                                            "sheetId": data_sheet_id,
-                                            "startRowIndex": _res_start,
-                                            "endRowIndex": _res_end,
-                                            "startColumnIndex": 0,
-                                            "endColumnIndex": 1,
-                                        }],
-                                    },
-                                },
-                            }],
-                            "series": [{
-                                "series": {
-                                    "sourceRange": {
-                                        "sources": [{
-                                            "sheetId": data_sheet_id,
-                                            "startRowIndex": _res_start,
-                                            "endRowIndex": _res_end,
-                                            "startColumnIndex": 2,
-                                            "endColumnIndex": 3,
-                                        }],
-                                    },
-                                },
-                                "targetAxis": "BOTTOM_AXIS",
-                            }],
-                            "headerCount": 1,
-                        },
-                    },
-                    "position": {
-                        "overlayPosition": {
-                            "anchorCell": {"sheetId": dashboard_sheet_id, "rowIndex": 44, "columnIndex": 5},
-                            "offsetXPixels": 10,
-                            "offsetYPixels": 0,
-                            "widthPixels": 450,
-                            "heightPixels": 320,
-                        },
-                    },
-                },
-            },
-        })
 
     # Run tab: colored section titles and bold colored header rows
     _r = data_sheet_id
@@ -1299,31 +940,6 @@ def _update_dashboard_sheet(
             "fields": _bg,
         },
     })
-    # Resource totals by namespace: section title and header (rows 54–55 in sheet = 0-based 53–55)
-    _res_title_row, _res_header_row, _res_data_start = 53, 54, 55
-    requests.append({
-        "repeatCell": {
-            "range": {"sheetId": _r, "startRowIndex": _res_title_row, "endRowIndex": _res_header_row, "startColumnIndex": 0, "endColumnIndex": 3},
-            "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["light_blue"]}},
-            "fields": _bg,
-        },
-    })
-    requests.append({
-        "repeatCell": {
-            "range": {"sheetId": _r, "startRowIndex": _res_header_row, "endRowIndex": _res_data_start, "startColumnIndex": 0, "endColumnIndex": 3},
-            "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["blue_header"], "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}}},
-            "fields": _bg + "," + _bold + ",userEnteredFormat.textFormat.foregroundColor",
-        },
-    })
-    # Right-align and format numeric columns (Total CPU m, Total Memory Gi) for Resource totals data
-    requests.append({
-        "repeatCell": {
-            "range": {"sheetId": _r, "startRowIndex": _res_data_start, "endRowIndex": _res_data_start + 50, "startColumnIndex": 1, "endColumnIndex": 3},
-            "cell": {"userEnteredFormat": {"horizontalAlignment": "RIGHT", "numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"}}},
-            "fields": "userEnteredFormat.horizontalAlignment,userEnteredFormat.numberFormat",
-        },
-    })
-
     if requests:
         sh.batch_update({"requests": requests})
     LOG.info(

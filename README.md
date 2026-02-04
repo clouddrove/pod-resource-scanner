@@ -192,6 +192,17 @@ Output goes to `./output/all-resources.csv`. For Google Sheet, set `GOOGLE_APPLI
 
 Builds the image and runs the scanner with `KUBECONFIG` mounted; CSV under `./output` by default.
 
+**Sample Excel (review before pushing)**
+
+To preview the Dashboard and Run tab layout without a cluster or Google Sheet:
+
+```bash
+pip install -r requirements.txt
+python scripts/generate_sample_excel.py
+```
+
+Creates `sample-pod-resource-scanner.xlsx` in the current directory with dummy data. Open it in Excel to review structure and columns before deploying.
+
 ---
 
 ## 🧪 Testing
