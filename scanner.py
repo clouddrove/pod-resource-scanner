@@ -738,7 +738,7 @@ def _update_dashboard_sheet(
     if formatted_combined:
         sorted_combined = sorted(
             formatted_combined[:1000],
-            key=lambda r: (str(r.get("namespace", "")), str(r.get("pod", "")), str(r.get("container", "")),
+            key=lambda r: (str(r.get("namespace", "")), str(r.get("pod", "")), str(r.get("container", ""))),
         )
         detail_header = [
             "Namespace", "Pod", "Container", "CPU Request", "CPU Limit",
