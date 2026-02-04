@@ -1253,6 +1253,28 @@ def _update_dashboard_sheet(
                 "fields": _bg + "," + _bold + ",userEnteredFormat.textFormat.foregroundColor",
             },
         })
+    # Right-align numeric columns across all summary tables for a professional look
+    requests.append({
+        "repeatCell": {
+            "range": {"sheetId": _r, "startRowIndex": 3, "endRowIndex": 53, "startColumnIndex": 1, "endColumnIndex": 3},
+            "cell": {"userEnteredFormat": {"horizontalAlignment": "RIGHT"}},
+            "fields": "userEnteredFormat.horizontalAlignment",
+        },
+    })
+    requests.append({
+        "repeatCell": {
+            "range": {"sheetId": _r, "startRowIndex": 3, "endRowIndex": 3 + _RUN_NODE_MAX_DATA, "startColumnIndex": 5, "endColumnIndex": 8},
+            "cell": {"userEnteredFormat": {"horizontalAlignment": "RIGHT"}},
+            "fields": "userEnteredFormat.horizontalAlignment",
+        },
+    })
+    requests.append({
+        "repeatCell": {
+            "range": {"sheetId": _r, "startRowIndex": 3, "endRowIndex": 3 + _RUN_REC_TYPE_MAX_DATA, "startColumnIndex": 10, "endColumnIndex": 11},
+            "cell": {"userEnteredFormat": {"horizontalAlignment": "RIGHT"}},
+            "fields": "userEnteredFormat.horizontalAlignment",
+        },
+    })
     # Container details: title row and header row (columns P–W)
     if formatted_combined:
         requests.append({
@@ -1275,6 +1297,30 @@ def _update_dashboard_sheet(
             "range": {"sheetId": _r, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 1},
             "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["light_gray"]}},
             "fields": _bg,
+        },
+    })
+    # Resource totals by namespace: section title and header (rows 54–55 in sheet = 0-based 53–55)
+    _res_title_row, _res_header_row, _res_data_start = 53, 54, 55
+    requests.append({
+        "repeatCell": {
+            "range": {"sheetId": _r, "startRowIndex": _res_title_row, "endRowIndex": _res_header_row, "startColumnIndex": 0, "endColumnIndex": 3},
+            "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["light_blue"]}},
+            "fields": _bg,
+        },
+    })
+    requests.append({
+        "repeatCell": {
+            "range": {"sheetId": _r, "startRowIndex": _res_header_row, "endRowIndex": _res_data_start, "startColumnIndex": 0, "endColumnIndex": 3},
+            "cell": {"userEnteredFormat": {"backgroundColor": _COLORS["blue_header"], "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}}},
+            "fields": _bg + "," + _bold + ",userEnteredFormat.textFormat.foregroundColor",
+        },
+    })
+    # Right-align and format numeric columns (Total CPU m, Total Memory Gi) for Resource totals data
+    requests.append({
+        "repeatCell": {
+            "range": {"sheetId": _r, "startRowIndex": _res_data_start, "endRowIndex": _res_data_start + 50, "startColumnIndex": 1, "endColumnIndex": 3},
+            "cell": {"userEnteredFormat": {"horizontalAlignment": "RIGHT", "numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"}}},
+            "fields": "userEnteredFormat.horizontalAlignment,userEnteredFormat.numberFormat",
         },
     })
 
