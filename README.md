@@ -67,7 +67,7 @@ A lightweight, **read-only** Kubernetes tool that runs as a CronJob on **AKS**, 
 
 - 📄 **CSV (always)** — Single file: **`all-resources.csv`**. Each run **appends** rows with a **scan_date** column. Raw column names (e.g. `cpu_request`, `memory_limit`, `node_cpu_util_pct`) and values (e.g. `100m`, `128Mi`, `38.9`) for easy parsing and tools.
 
-- 📋 **Google Sheet (optional)** — **One new tab per run** (historical data) + **Dashboard:** Each run creates **"Run &lt;timestamp&gt;"** with that run’s summary tables; only the last **N** run tabs are kept (configurable). **"All Resources"** holds the latest container-level metrics. **"Dashboard"** shows KPIs and charts for the **latest** run; you can open any **Run &lt;timestamp&gt;** tab to compare history.
+- 📋 **Google Sheet (optional)** — **One new tab per run** (historical data) + **Dashboard:** Each run creates **"Run &lt;timestamp&gt;"** with that run’s summary tables; only the last **N** run tabs are kept (configurable). **Dashboard** shows KPIs for the latest run; open any **Run &lt;timestamp&gt;** tab for full details and history.
 
 ---
 
@@ -168,7 +168,7 @@ RBAC: the chart creates a **ClusterRole** and **ClusterRoleBinding** (read-only)
    helm upgrade pod-resource-scanner ./chart -n pod-resource-scanner --set googleSheet.enabled=true
    ```
 
-The job appends to `all-resources.csv` and updates the sheet: **All Resources** (metrics × containers for latest run), a new **Run &lt;timestamp&gt;** tab each run (namespace, node utilization, recommendations—keeps last N for history), and **Dashboard** (KPIs and charts for the latest run). Set `POD_SCANNER_SHEET_RUN_TABS_KEEP` (default 10) to control how many run tabs are retained.
+The job appends to `all-resources.csv` and updates the sheet: a new **Run &lt;timestamp&gt;** tab each run (namespace summary, node utilization, recommendations, container details—keeps last N for history) and **Dashboard** (KPIs for the latest run). Set `POD_SCANNER_SHEET_RUN_TABS_KEEP` (default 10) to control how many run tabs are retained.
 
 ---
 

@@ -545,7 +545,7 @@ def update_google_sheet(
     recommendations: List[dict],
     run_ts: str,
 ):
-    """Update Google Sheet: metrics vertical (rows), containers horizontal (columns) for easy comparison."""
+    """Update Google Sheet: new Run <timestamp> tab per run, Dashboard for latest; remove obsolete All Resources tab if present."""
     import gspread
     from google.oauth2.service_account import Credentials
 
@@ -574,34 +574,16 @@ def update_google_sheet(
         str(r.get("container", "")),
     ))
 
-    num_metrics = len(SHEET_METRIC_ROWS)
-    num_containers = len(formatted)
-    if num_containers == 0:
+    if len(formatted) == 0:
         LOG.info("No container data; skipping Google Sheet update")
         return
 
-    # Build transposed matrix: rows = metrics, columns = [Metric name, container1, container2, ...]
-    # Row 1: ["Metric", label1, label2, ...]
-    header_row = ["Metric"] + [_container_column_label(r) for r in formatted]
-    data_rows = []
-    for i, metric_name in enumerate(SHEET_METRIC_ROWS):
-        key = _SHEET_METRIC_KEYS[i]
-        values = [str(r.get(key, "")) for r in formatted]
-        data_rows.append([metric_name] + values)
-
+    # Remove "All Resources" tab if present (no longer used; Run tabs have container details)
     try:
-        ws = sh.worksheet("All Resources")
+        sh.del_worksheet(sh.worksheet("All Resources"))
+        LOG.info("Removed obsolete 'All Resources' tab from sheet")
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet("All Resources", rows=num_metrics + 10, cols=num_containers + 10)
-
-    # Clear sheet first so any old content at the bottom (e.g. "Resource totals by namespace") is removed
-    ws.clear()
-    sheet_data = [header_row] + data_rows
-    ws.update(range_name="A1", values=sheet_data, value_input_option="RAW")
-    LOG.info(
-        "Updated sheet 'All Resources' (metrics vertical, containers horizontal): %s metrics × %s containers (scan_date=%s)",
-        num_metrics, num_containers, run_ts,
-    )
+        pass
 
     _update_dashboard_sheet(sh, summary, node_util, recommendations, run_ts, formatted, combined)
 
@@ -859,7 +841,17 @@ def _update_dashboard_sheet(
     mem_req_gi = round(total_mem_req / (1024 ** 3), 2)
     mem_alloc_gi = round(total_mem_alloc / (1024 ** 3), 2)
 
-    # Dashboard: explainable at a glance — title, explanation, KPIs, then CPU/Memory calculation
+    # Node scaling guidance from scale_up / scale_down recommendations
+    has_scale_up = any(r.get("type") == "scale_up" for r in recommendations)
+    has_scale_down = any(r.get("type") == "scale_down" for r in recommendations)
+    if has_scale_up:
+        scale_nodes_msg = "Consider adding nodes (high utilization or cluster capacity)"
+    elif has_scale_down:
+        scale_nodes_msg = "Consider scaling down (low utilization — save cost)"
+    else:
+        scale_nodes_msg = "No action needed"
+
+    # Dashboard: explainable at a glance — title, explanation, KPIs, CPU/Memory, scale guidance
     kpi_rows = [
         [dash_title, "", "", "", "Last updated: ", "=" + _dn + "A1"],
         ["Summary of the latest scan. Open a Run tab for full details and container-level recommendations.", "", "", "", "", ""],
@@ -867,6 +859,7 @@ def _update_dashboard_sheet(
         ["Recommendations to review", "=SUM(" + _dn + "K4:K" + _rec_end + ")", "", "", "", ""],
         ["CPU (cluster)", f"requested: {int(total_cpu_req)} m", f"allocatable: {int(total_cpu_alloc)} m", f"usage: {cpu_pct}%", "", ""],
         ["Memory (cluster)", f"requested: {mem_req_gi} Gi", f"allocatable: {mem_alloc_gi} Gi", f"usage: {mem_pct}%", "", ""],
+        ["Scale nodes?", scale_nodes_msg, "", "", "", ""],
     ]
     dash_ws.clear()
     dash_ws.update(range_name="A1", values=kpi_rows, value_input_option="USER_ENTERED")
@@ -880,7 +873,7 @@ def _update_dashboard_sheet(
             "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold,userEnteredFormat.textFormat.foregroundColor,userEnteredFormat.textFormat.fontSize",
         },
     })
-    for row, color_key in [(1, "dash_row4"), (2, "dash_row1"), (3, "dash_row2"), (4, "dash_row3"), (5, "dash_row2"), (6, "dash_row3")]:
+    for row, color_key in [(1, "dash_row4"), (2, "dash_row1"), (3, "dash_row2"), (4, "dash_row3"), (5, "dash_row2"), (6, "dash_row3"), (7, "dash_row2")]:
         requests.append({
             "repeatCell": {
                 "range": {"sheetId": _d, "startRowIndex": row, "endRowIndex": row + 1, "startColumnIndex": 0, "endColumnIndex": 6},
