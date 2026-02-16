@@ -193,20 +193,105 @@ def scan_nodes(v1: client.CoreV1Api) -> List[dict]:
     return out
 
 
-def namespace_summary(rows: List[dict]) -> List[dict]:
-    """Aggregate by namespace: pod count and container count."""
+def read_previous_scan(output_dir: Path) -> Dict[str, dict]:
+    """Read the most recent scan data from CSV for comparison. Returns dict keyed by namespace."""
+    csv_path = output_dir / OUTPUT_CSV_NAME
+    if not csv_path.exists():
+        return {}
+    
+    try:
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        
+        if not rows:
+            return {}
+        
+        # Find the most recent scan_date (last unique timestamp)
+        scan_dates = sorted(set(r.get("scan_date", "") for r in rows if r.get("scan_date")), reverse=True)
+        if len(scan_dates) < 2:
+            # Need at least 2 scans to compare
+            return {}
+        
+        previous_scan_date = scan_dates[1]  # Second most recent
+        previous_rows = [r for r in rows if r.get("scan_date") == previous_scan_date]
+        
+        # Aggregate by namespace (similar to namespace_summary)
+        from collections import defaultdict
+        by_ns = defaultdict(lambda: {"pods": set(), "containers": 0, "cpu": 0.0, "memory": 0.0})
+        for r in previous_rows:
+            ns = r.get("namespace", "")
+            if not ns:
+                continue
+            by_ns[ns]["pods"].add(r.get("pod", ""))
+            by_ns[ns]["containers"] += 1
+            by_ns[ns]["cpu"] += quantity_to_millicores(r.get("cpu_request", ""))
+            by_ns[ns]["memory"] += quantity_to_bytes(r.get("memory_request", ""))
+        
+        result = {}
+        for ns, data in by_ns.items():
+            result[ns] = {
+                "scan_date": previous_scan_date,
+                "pod_count": len(data["pods"]),
+                "container_count": data["containers"],
+                "cpu_requested_millicores": round(data["cpu"], 0),
+                "memory_requested_bytes": round(data["memory"], 0),
+            }
+        
+        LOG.info("Loaded previous scan data from %s (%s namespaces)", previous_scan_date, len(result))
+        return result
+    except Exception as e:
+        LOG.warning("Could not read previous scan data: %s", e)
+        return {}
+
+
+def namespace_summary(rows: List[dict], previous_summary: Optional[Dict[str, dict]] = None) -> List[dict]:
+    """Aggregate by namespace: pod count, container count, and week-over-week changes."""
     from collections import defaultdict
-    by_ns = defaultdict(lambda: {"pods": set(), "containers": 0})
+    by_ns = defaultdict(lambda: {"pods": set(), "containers": 0, "cpu": 0.0, "memory": 0.0})
     for r in rows:
         by_ns[r["namespace"]]["pods"].add(r["pod"])
         by_ns[r["namespace"]]["containers"] += 1
+        by_ns[r["namespace"]]["cpu"] += quantity_to_millicores(r.get("cpu_request", ""))
+        by_ns[r["namespace"]]["memory"] += quantity_to_bytes(r.get("memory_request", ""))
     out = []
     for ns, data in sorted(by_ns.items()):
-        out.append({
+        pod_count = len(data["pods"])
+        cpu_req = data["cpu"]
+        mem_req = data["memory"]
+        
+        result = {
             "namespace": ns,
-            "pod_count": len(data["pods"]),
+            "pod_count": pod_count,
             "container_count": data["containers"],
-        })
+            "cpu_requested_millicores": round(cpu_req, 0),
+            "memory_requested_bytes": round(mem_req, 0),
+        }
+        
+        # Calculate week-over-week changes if previous data exists
+        if previous_summary and ns in previous_summary:
+            prev = previous_summary[ns]
+            prev_cpu = prev.get("cpu_requested_millicores", 0)
+            prev_mem = prev.get("memory_requested_bytes", 0)
+            prev_pods = prev.get("pod_count", 0)
+            
+            # Calculate percentage changes
+            cpu_change_pct = ((cpu_req - prev_cpu) / prev_cpu * 100) if prev_cpu > 0 else 0.0
+            mem_change_pct = ((mem_req - prev_mem) / prev_mem * 100) if prev_mem > 0 else 0.0
+            pod_change = pod_count - prev_pods
+            
+            result["cpu_change_pct"] = round(cpu_change_pct, 1)
+            result["memory_change_pct"] = round(mem_change_pct, 1)
+            result["pod_count_change"] = pod_change
+            result["previous_scan_date"] = prev.get("scan_date", "")
+        else:
+            # First time seeing this namespace
+            result["cpu_change_pct"] = 0.0
+            result["memory_change_pct"] = 0.0
+            result["pod_count_change"] = 0
+            result["previous_scan_date"] = ""
+        
+        out.append(result)
     return out
 
 
@@ -249,8 +334,10 @@ def node_utilization(node_rows: List[dict], requested: Dict[str, Dict[str, float
 def build_recommendations(
     node_util: List[dict],
     pod_rows: List[dict],
+    namespace_summary: List[dict],
     util_scale_up_pct: float = 75.0,
     util_scale_down_pct: float = 25.0,
+    growth_alert_pct: float = 20.0,
 ) -> List[dict]:
     """Produce recommendations: scale up/down nodes, set or adjust limits."""
     recs = []
@@ -279,8 +366,8 @@ def build_recommendations(
     # Cluster-level from same data
     total_cpu_alloc = sum(quantity_to_millicores(n.get("cpu_allocatable", "")) for n in node_util if n.get("node") != "_unscheduled_")
     total_mem_alloc = sum(quantity_to_bytes(n.get("memory_allocatable", "")) for n in node_util if n.get("node") != "_unscheduled_")
-    total_cpu_req = sum(n.get("cpu_requested_millicores", 0) for n in node_util)
-    total_mem_req = sum(n.get("memory_requested_bytes", 0) for n in node_util)
+    total_cpu_req = sum(n.get("cpu_requested_millicores", 0) for n in node_util if n.get("node") != "_unscheduled_")
+    total_mem_req = sum(n.get("memory_requested_bytes", 0) for n in node_util if n.get("node") != "_unscheduled_")
     if total_cpu_alloc and total_cpu_req / total_cpu_alloc >= util_scale_up_pct / 100:
         recs.append({
             "type": "scale_up",
@@ -328,6 +415,26 @@ def build_recommendations(
                 "reason": f"Memory limit >> request (limit {format_bytes(mem_lim)}, request {format_bytes(mem_req)})",
                 "action": "Consider lowering memory limit to match usage.",
             })
+    
+    # Namespace-level: alert on significant growth
+    for ns_data in namespace_summary:
+        ns = ns_data.get("namespace", "")
+        cpu_change = ns_data.get("cpu_change_pct", 0)
+        mem_change = ns_data.get("memory_change_pct", 0)
+        
+        if cpu_change >= growth_alert_pct or mem_change >= growth_alert_pct:
+            changes = []
+            if cpu_change >= growth_alert_pct:
+                changes.append(f"CPU +{cpu_change:.1f}%")
+            if mem_change >= growth_alert_pct:
+                changes.append(f"memory +{mem_change:.1f}%")
+            recs.append({
+                "type": "growth_alert",
+                "target": f"namespace:{ns}",
+                "reason": f"Significant growth since last scan: {', '.join(changes)}",
+                "action": "Review namespace for unexpected resource increases or runaway processes.",
+            })
+    
     return recs
 
 
@@ -344,7 +451,11 @@ NODE_UTIL_COLUMNS = [
     "node_cpu_requested_millicores", "node_memory_requested_bytes", "node_ephemeral_storage_requested_bytes",
     "node_cpu_util_pct", "node_memory_util_pct", "node_disk_util_pct",
 ]
-NS_SUMMARY_COLUMNS = ["ns_pod_count", "ns_container_count"]
+NS_SUMMARY_COLUMNS = [
+    "ns_pod_count", "ns_container_count", "ns_cpu_requested_millicores", 
+    "ns_memory_requested_bytes", "ns_cpu_change_pct", "ns_memory_change_pct", 
+    "ns_pod_count_change", "ns_previous_scan_date"
+]
 COMBINED_HEADERS = POD_HEADERS + NODE_UTIL_COLUMNS + NS_SUMMARY_COLUMNS + ["recommendations"]
 # Single cumulative file: scan_date first so history is in one place
 HISTORY_CSV_HEADERS = ["scan_date"] + COMBINED_HEADERS
@@ -382,6 +493,12 @@ DISPLAY_HEADERS = [
     "Node Disk Util %",
     "Namespace Pod Count",
     "Namespace Container Count",
+    "Namespace CPU Requested (millicores)",
+    "Namespace Memory Requested (bytes)",
+    "Namespace CPU Change %",
+    "Namespace Memory Change %",
+    "Namespace Pod Count Change",
+    "Previous Scan Date",
     "Recommendations",
 ]
 
@@ -434,10 +551,10 @@ def _format_value_for_display(key: str, value: Any) -> str:
             return format_millicores(float(value))
         except (TypeError, ValueError):
             return str(value)
-    if key in ("node_cpu_util_pct", "node_memory_util_pct", "node_disk_util_pct"):
+    if key in ("node_cpu_util_pct", "node_memory_util_pct", "node_disk_util_pct", "ns_cpu_change_pct", "ns_memory_change_pct"):
         try:
             pct = float(value)
-            return f"{pct:.1f}%" if pct == pct else ""
+            return f"{pct:+.1f}%" if key in ("ns_cpu_change_pct", "ns_memory_change_pct") else f"{pct:.1f}%"
         except (TypeError, ValueError):
             return str(value)
     return str(value).strip()
@@ -461,6 +578,10 @@ def _format_row_for_display(row: dict) -> dict:
             "status",
             "ns_pod_count",
             "ns_container_count",
+            "ns_cpu_requested_millicores",
+            "ns_memory_requested_bytes",
+            "ns_pod_count_change",
+            "ns_previous_scan_date",
             "recommendations",
         ):
             out[k] = v if v is not None and str(v).strip() else ""
@@ -500,6 +621,12 @@ def _build_combined_rows(
         s = summary_by_key.get(ns_key, {})
         row["ns_pod_count"] = s.get("pod_count", "")
         row["ns_container_count"] = s.get("container_count", "")
+        row["ns_cpu_requested_millicores"] = s.get("cpu_requested_millicores", "")
+        row["ns_memory_requested_bytes"] = s.get("memory_requested_bytes", "")
+        row["ns_cpu_change_pct"] = s.get("cpu_change_pct", "")
+        row["ns_memory_change_pct"] = s.get("memory_change_pct", "")
+        row["ns_pod_count_change"] = s.get("pod_count_change", "")
+        row["ns_previous_scan_date"] = s.get("previous_scan_date", "")
         target = f"{r.get('namespace', '')}/{r.get('pod', '')}/{r.get('container', '')}"
         row["recommendations"] = "; ".join(recs_by_target.get(target, []))
         combined.append(row)
@@ -608,7 +735,7 @@ def _dashboard_get_existing_chart_ids(sh, dashboard_sheet_id: int) -> List[int]:
     )
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             data = __import__("json").loads(resp.read().decode())
     except Exception:
         return []
@@ -1029,6 +1156,7 @@ def main() -> None:
     cluster_name = os.environ.get("POD_SCANNER_CLUSTER_NAME", "").strip()
     util_scale_up = float(os.environ.get("POD_SCANNER_UTIL_SCALE_UP_PCT", "75"))
     util_scale_down = float(os.environ.get("POD_SCANNER_UTIL_SCALE_DOWN_PCT", "25"))
+    growth_alert_pct = float(os.environ.get("POD_SCANNER_GROWTH_ALERT_PCT", "20"))
     retention_days = int(os.environ.get("POD_SCANNER_RETENTION_DAYS", "0"))
     update_sheet = os.environ.get("POD_SCANNER_UPDATE_GOOGLE_SHEET", "").lower() in ("1", "true", "yes")
 
@@ -1043,15 +1171,19 @@ def main() -> None:
         v1 = client.CoreV1Api()
         apps_v1 = client.AppsV1Api()
 
+        # Read previous scan data for comparison
+        previous_summary = read_previous_scan(output_dir)
+        
         rows = scan(v1, apps_v1)
-        summary = namespace_summary(rows)
+        summary = namespace_summary(rows, previous_summary)
         node_rows = scan_nodes(v1)
         requested = node_requested_totals(rows)
         node_util = node_utilization(node_rows, requested)
         recommendations = build_recommendations(
-            node_util, rows,
+            node_util, rows, summary,
             util_scale_up_pct=util_scale_up,
             util_scale_down_pct=util_scale_down,
+            growth_alert_pct=growth_alert_pct,
         )
         inject_cluster(cluster_name, rows, summary, node_rows, node_util, recommendations)
 

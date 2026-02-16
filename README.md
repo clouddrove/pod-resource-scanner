@@ -34,6 +34,7 @@ A lightweight, **read-only** Kubernetes tool that runs as a CronJob on **AKS**, 
 - 📁 **Single CSV** — One append-only file (`all-resources.csv`) with `scan_date` for long-term history
 - 👁️ **Human-readable** — Memory/CPU/disk in Mi, Gi, cores, and % (no raw bytes or millicores)
 - 💡 **Recommendations** — Suggests scale up/down and limit changes (e.g. limit >> request)
+- 📈 **Week-over-Week Comparison** — Tracks resource changes per namespace with growth alerts
 - 📋 **Optional Google Sheet** — Same data appended to one sheet for dashboards and sharing
 - ⏰ **Helm + CronJob** — Deploy once; runs on a schedule (e.g. weekly)
 
@@ -58,8 +59,9 @@ A lightweight, **read-only** Kubernetes tool that runs as a CronJob on **AKS**, 
 | **Pods / Containers** | Namespace, pod, container, node, workload kind/name, replicas, CPU/memory/ephemeral-storage request & limit, status |
 | **Nodes** | Per-node CPU, memory, and disk (ephemeral-storage) capacity and allocatable |
 | **Utilization** | Requested vs allocatable per node (CPU, memory, disk %) |
-| **Namespace** | Pod count and container count per namespace |
-| **Recommendations** | Scale up (add nodes), scale down (consolidate), change limits (set or lower limits) |
+| **Namespace** | Pod count, container count, CPU/memory requested per namespace |
+| **Week-over-Week** | CPU/memory/pod count changes vs previous scan with % growth |
+| **Recommendations** | Scale up (add nodes), scale down (consolidate), change limits (set or lower limits), growth alerts (>20% increase) |
 
 ---
 
@@ -144,6 +146,7 @@ See **Configuration** and `chart/values.yaml` for all options.
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON | - |
 | `POD_SCANNER_UTIL_SCALE_UP_PCT` | Utilization % above which to recommend scale up | `75` |
 | `POD_SCANNER_UTIL_SCALE_DOWN_PCT` | Utilization % below which to recommend scale down | `25` |
+| `POD_SCANNER_GROWTH_ALERT_PCT` | Namespace growth % to trigger alert (week-over-week) | `20` |
 | `POD_SCANNER_LOG_LEVEL` | Logging level | `INFO` |
 
 RBAC: the chart creates a **ClusterRole** and **ClusterRoleBinding** (read-only) so the scanner can list nodes, namespaces, pods, and workloads.

@@ -1,4 +1,5 @@
 """Parse Kubernetes resource quantities (no K8s dependency). Used by scanner and tests."""
+import math
 import re
 
 
@@ -28,7 +29,7 @@ def quantity_to_bytes(s: str) -> float:
     s = (s or "").strip()
     if not s:
         return 0.0
-    m = re.match(r"^([0-9]+\.?[0-9]*)\s*([KMGTPE]i?)?$", s.strip(), re.IGNORECASE)
+    m = re.match(r"^([0-9]*\.?[0-9]+)\s*([KMGTPE]i?)?$", s.strip(), re.IGNORECASE)
     if not m:
         return 0.0
     try:
@@ -65,7 +66,7 @@ def quantity_to_bytes(s: str) -> float:
 
 def format_bytes(n: float) -> str:
     """Format byte count as human-readable (e.g. 268435456 -> '256 Mi', 0 -> '')."""
-    if n is None or (isinstance(n, float) and (n != n or n <= 0)):
+    if n is None or (isinstance(n, float) and (n != n or n <= 0 or math.isinf(n))):
         return ""
     n = float(n)
     if n <= 0:
@@ -79,7 +80,7 @@ def format_bytes(n: float) -> str:
 
 def format_millicores(m: float) -> str:
     """Format millicores as human-readable (e.g. 200 -> '200m', 1500 -> '1.5 cores', 0 -> '')."""
-    if m is None or (isinstance(m, float) and (m != m or m < 0)):
+    if m is None or (isinstance(m, float) and (m != m or m < 0 or math.isinf(m))):
         return ""
     m = float(m)
     if m <= 0:
