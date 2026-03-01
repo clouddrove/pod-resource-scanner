@@ -147,6 +147,7 @@ See **Configuration** and `chart/values.yaml` for all options.
 | `POD_SCANNER_UTIL_SCALE_UP_PCT` | Utilization % above which to recommend scale up | `75` |
 | `POD_SCANNER_UTIL_SCALE_DOWN_PCT` | Utilization % below which to recommend scale down | `25` |
 | `POD_SCANNER_GROWTH_ALERT_PCT` | Namespace growth % to trigger alert (week-over-week) | `20` |
+| `POD_SCANNER_RETENTION_DAYS` | Delete snapshot CSVs older than N days (`0` = keep all) | `0` |
 | `POD_SCANNER_LOG_LEVEL` | Logging level | `INFO` |
 
 RBAC: the chart creates a **ClusterRole** and **ClusterRoleBinding** (read-only) so the scanner can list nodes, namespaces, pods, and workloads.
@@ -190,32 +191,25 @@ Output goes to `./output/all-resources.csv`. For Google Sheet, set `GOOGLE_APPLI
 **Docker (local kubeconfig)**
 
 ```bash
-./scripts/docker-test.sh
+docker build -t pod-resource-scanner:local .
+docker run --rm \
+  -v ~/.kube:/home/appuser/.kube:ro \
+  -v "$(pwd)/output":/output \
+  pod-resource-scanner:local
 ```
 
-Builds the image and runs the scanner with `KUBECONFIG` mounted; CSV under `./output` by default.
-
-**Sample Excel (review before pushing)**
-
-To preview the Dashboard and Run tab layout without a cluster or Google Sheet:
-
-```bash
-pip install -r requirements.txt
-python scripts/generate_sample_excel.py
-```
-
-Creates `sample-pod-resource-scanner.xlsx` in the current directory with dummy data. Open it in Excel to review structure and columns before deploying.
+Builds the image and runs the scanner using your local kubeconfig; CSV is written to `./output`.
 
 ---
 
 ## 🧪 Testing
 
 ```bash
-pip install -r requirements.txt
+pip install pytest
 python3 -m pytest tests/ -v
 ```
 
-No cluster required for the quantity and formatting tests.
+No cluster or Google Sheets account required — all tests run with mocked dependencies.
 
 ---
 

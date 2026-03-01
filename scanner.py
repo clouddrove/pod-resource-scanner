@@ -11,6 +11,7 @@ for scale up/down and limit changes.
 import os
 import csv
 import sys
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -461,6 +462,20 @@ COMBINED_HEADERS = POD_HEADERS + NODE_UTIL_COLUMNS + NS_SUMMARY_COLUMNS + ["reco
 HISTORY_CSV_HEADERS = ["scan_date"] + COMBINED_HEADERS
 OUTPUT_CSV_NAME = "all-resources.csv"
 
+_CSV_INJECTION_PREFIXES = frozenset("=+-@")
+
+
+def _csv_safe(value: Any) -> Any:
+    """Prefix formula-like strings with a single quote to prevent CSV injection.
+
+    Spreadsheet clients (Excel, Google Sheets) treat a leading apostrophe as a
+    text-prefix and display the rest of the value as plain text, so the formula
+    is never executed.  Numeric and non-string values are returned unchanged.
+    """
+    if isinstance(value, str) and value and value[0] in _CSV_INJECTION_PREFIXES:
+        return "'" + value
+    return value
+
 # Human-readable column names for CSV/Sheet (same order as HISTORY_CSV_HEADERS)
 DISPLAY_HEADERS = [
     "Scan Date",
@@ -653,7 +668,7 @@ def write_csv(
         w = csv.DictWriter(f, fieldnames=HISTORY_CSV_HEADERS, extrasaction="ignore")
         if not file_exists:
             w.writeheader()
-        w.writerows(combined)
+        w.writerows([{k: _csv_safe(v) for k, v in row.items()} for row in combined])
     LOG.info("Appended %s rows to %s (scan_date=%s)", len(combined), path, run_ts)
 
 
@@ -736,7 +751,7 @@ def _dashboard_get_existing_chart_ids(sh, dashboard_sheet_id: int) -> List[int]:
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            data = __import__("json").loads(resp.read().decode())
+            data = json.loads(resp.read().decode())
     except Exception:
         return []
     chart_ids: List[int] = []
@@ -892,22 +907,9 @@ def _update_dashboard_sheet(
             "fields": "pixelSize",
         },
     })
-    # Add basic filter on Container details (P2:W) so users can filter/sort by Namespace, Pod, etc.
-    if formatted_combined:
-        requests.append({
-            "setBasicFilter": {
-                "filter": {
-                    "range": {
-                        "sheetId": data_sheet_id,
-                        "startRowIndex": 1,
-                        "endRowIndex": 115,
-                        "startColumnIndex": 15,
-                        "endColumnIndex": 23,
-                    },
-                },
-            },
-        })
     # Merge Namespace column (P) for consecutive rows with the same namespace
+    # NOTE: mergeCells must be batched BEFORE setBasicFilter; Google Sheets rejects merges
+    # that overlap an existing filter range.
     if sorted_combined:
         ns_col = 15  # P
         data_start_row = 2  # 0-based: title 0, header 1, data from 2
@@ -931,6 +933,23 @@ def _update_dashboard_sheet(
                     },
                 })
             i = j
+
+    # Add basic filter on Container details (P2:W) so users can filter/sort by Namespace, Pod, etc.
+    # Appended after mergeCells so the filter doesn't block the merges in the same batch.
+    if formatted_combined:
+        requests.append({
+            "setBasicFilter": {
+                "filter": {
+                    "range": {
+                        "sheetId": data_sheet_id,
+                        "startRowIndex": 1,
+                        "endRowIndex": 115,
+                        "startColumnIndex": 15,
+                        "endColumnIndex": 23,
+                    },
+                },
+            },
+        })
 
     # Prune old run tabs: keep only the last N (so we have historical data but not hundreds of tabs)
     keep_n = int(os.environ.get("POD_SCANNER_SHEET_RUN_TABS_KEEP", "10"))
@@ -1154,10 +1173,14 @@ def main() -> None:
     run_ts = datetime.utcnow().strftime("%Y-%m-%dT%H%M%SZ")
     output_dir = Path(os.environ.get("POD_SCANNER_OUTPUT_DIR", "/output"))
     cluster_name = os.environ.get("POD_SCANNER_CLUSTER_NAME", "").strip()
-    util_scale_up = float(os.environ.get("POD_SCANNER_UTIL_SCALE_UP_PCT", "75"))
-    util_scale_down = float(os.environ.get("POD_SCANNER_UTIL_SCALE_DOWN_PCT", "25"))
-    growth_alert_pct = float(os.environ.get("POD_SCANNER_GROWTH_ALERT_PCT", "20"))
-    retention_days = int(os.environ.get("POD_SCANNER_RETENTION_DAYS", "0"))
+    try:
+        util_scale_up = float(os.environ.get("POD_SCANNER_UTIL_SCALE_UP_PCT", "75"))
+        util_scale_down = float(os.environ.get("POD_SCANNER_UTIL_SCALE_DOWN_PCT", "25"))
+        growth_alert_pct = float(os.environ.get("POD_SCANNER_GROWTH_ALERT_PCT", "20"))
+        retention_days = int(os.environ.get("POD_SCANNER_RETENTION_DAYS", "0"))
+    except ValueError as e:
+        LOG.error("Invalid numeric environment variable: %s", e)
+        sys.exit(1)
     update_sheet = os.environ.get("POD_SCANNER_UPDATE_GOOGLE_SHEET", "").lower() in ("1", "true", "yes")
 
     try:

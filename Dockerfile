@@ -5,7 +5,8 @@ RUN adduser --disabled-password --gecos "" --uid 1000 appuser
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir -q kubernetes gspread google-auth google-auth-oauthlib
+COPY requirements.txt .
+RUN pip install --no-cache-dir -q -r requirements.txt
 
 COPY quantity.py scanner.py .
 
