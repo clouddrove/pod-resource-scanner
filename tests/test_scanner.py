@@ -528,7 +528,7 @@ class TestEnrichWithCost:
 # ---------------------------------------------------------------------------
 
 class TestWritePrometheusMetrics:
-    def _run(self, tmp_path, summary=None, node_util=None, recommendations=None):
+    def _run(self, tmp_path, summary=None, node_util=None, recommendations=None, rows=None):
         write_prometheus_metrics(
             tmp_path,
             "2026-02-28T120000Z",
@@ -536,6 +536,7 @@ class TestWritePrometheusMetrics:
             summary or [],
             node_util or [],
             recommendations or [],
+            rows or [],
         )
         return (tmp_path / "pod-scanner.prom").read_text(encoding="utf-8")
 
@@ -593,6 +594,42 @@ class TestWritePrometheusMetrics:
                       "cpu_usage_pct": "", "memory_usage_pct": ""}]
         content = self._run(tmp_path, node_util=node_util)
         assert "_unscheduled_" not in content
+
+    def test_namespace_oom_metric_emitted(self, tmp_path):
+        rows = [
+            {"namespace": "default", "oom_killed": 1, "est_monthly_cost_usd": 10.5},
+            {"namespace": "default", "oom_killed": 1, "est_monthly_cost_usd": 5.0},
+            {"namespace": "prod", "oom_killed": 0, "est_monthly_cost_usd": 20.0},
+        ]
+        write_prometheus_metrics(tmp_path, "2026-02-28T120000Z", "cls", [], [], [], rows)
+        content = (tmp_path / "pod-scanner.prom").read_text()
+        assert "pod_scanner_namespace_oom_killed_total" in content
+        assert 'namespace="default"' in content
+        # default: 2 OOM kills (label order: namespace, cluster)
+        assert 'namespace="default",cluster="cls"} 2' in content
+
+    def test_namespace_cost_metric_emitted(self, tmp_path):
+        rows = [
+            {"namespace": "default", "oom_killed": 0, "est_monthly_cost_usd": 12.5},
+            {"namespace": "default", "oom_killed": 0, "est_monthly_cost_usd": 7.5},
+        ]
+        write_prometheus_metrics(tmp_path, "2026-02-28T120000Z", "cls", [], [], [], rows)
+        content = (tmp_path / "pod-scanner.prom").read_text()
+        assert "pod_scanner_namespace_est_monthly_cost_usd" in content
+        # 12.5 + 7.5 = 20.0
+        assert "20.0" in content
+
+    def test_no_oom_metric_when_all_zero(self, tmp_path):
+        rows = [{"namespace": "default", "oom_killed": 0, "est_monthly_cost_usd": ""}]
+        write_prometheus_metrics(tmp_path, "2026-02-28T120000Z", "cls", [], [], [], rows)
+        content = (tmp_path / "pod-scanner.prom").read_text()
+        assert "pod_scanner_namespace_oom_killed_total" not in content
+
+    def test_no_cost_metric_when_all_empty(self, tmp_path):
+        rows = [{"namespace": "default", "oom_killed": 0, "est_monthly_cost_usd": ""}]
+        write_prometheus_metrics(tmp_path, "2026-02-28T120000Z", "cls", [], [], [], rows)
+        content = (tmp_path / "pod-scanner.prom").read_text()
+        assert "pod_scanner_namespace_est_monthly_cost_usd" not in content
 
 
 # ---------------------------------------------------------------------------

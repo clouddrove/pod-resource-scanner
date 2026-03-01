@@ -22,6 +22,7 @@ A lightweight, **read-only** Kubernetes tool that runs as a CronJob on **AKS**, 
 - [🧪 Testing](#-testing)
 - [✅ Production Checklist](#-production-checklist)
 - [🐛 Troubleshooting](#-troubleshooting)
+- [📡 Grafana Dashboard](#-grafana-dashboard)
 - [🤝 Contributing](#-contributing)
 - [📄 License](#-license)
 
@@ -266,6 +267,57 @@ kubectl logs -n pod-resource-scanner job/manual-test -f
 ```
 
 The scanner writes `last_success.txt` in the output directory (`timestamp=`, `cluster=`) for monitoring.
+
+---
+
+## 📡 Grafana Dashboard
+
+A pre-built Grafana dashboard is included at [`grafana/dashboard.json`](grafana/dashboard.json). Import it in seconds — no manual panel setup required.
+
+### Prerequisites
+
+Configure Prometheus **node_exporter** textfile collector to scrape `pod-scanner.prom`:
+
+```yaml
+# values.yaml (kube-prometheus-stack or node-exporter chart)
+extraArgs:
+  - --collector.textfile.directory=/output
+
+extraVolumeMounts:
+  - name: pod-scanner-output
+    mountPath: /output
+    readOnly: true
+```
+
+Or if running node_exporter directly:
+```bash
+node_exporter --collector.textfile.directory=/path/to/output
+```
+
+The scanner and node_exporter must share the same output directory (PVC or hostPath).
+
+### Import
+
+1. Open Grafana → **Dashboards** → **Import**
+2. Upload `grafana/dashboard.json` or paste its contents
+3. Select your **Prometheus** data source
+4. Pick your **cluster** from the variable drop-down
+
+### Dashboard Panels
+
+| Panel | Metric |
+|---|---|
+| Last Scan Age | `pod_scanner_last_scan_timestamp_seconds` |
+| Namespaces / Nodes / Recommendations / Cost | Stat cards |
+| CPU Requested by Namespace | `pod_scanner_namespace_cpu_requested_millicores` |
+| Memory Requested by Namespace | `pod_scanner_namespace_memory_requested_bytes` |
+| CPU Week-over-Week Change % | `pod_scanner_namespace_cpu_change_pct` |
+| Node CPU / Memory Utilization % | `pod_scanner_node_cpu_util_pct`, `pod_scanner_node_memory_util_pct` |
+| Node CPU / Memory Actual Usage % | `pod_scanner_node_cpu_usage_pct`, `pod_scanner_node_memory_usage_pct` |
+| Recommendations by Type | `pod_scanner_recommendations_total` |
+| Namespace Cost, OOM Kills & CPU Change | `pod_scanner_namespace_est_monthly_cost_usd`, `pod_scanner_namespace_oom_killed_total`, `pod_scanner_namespace_cpu_change_pct` |
+
+> **Note:** Node actual usage panels are only populated when metrics-server is enabled (`POD_SCANNER_METRICS_ENABLED=true`).
 
 ---
 

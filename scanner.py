@@ -1401,11 +1401,31 @@ def write_prometheus_metrics(
     summary: List[dict],
     node_util: List[dict],
     recommendations: List[dict],
+    rows: List[dict] = [],
 ) -> None:
     """Write Prometheus textfile collector metrics to pod-scanner.prom."""
     import time as _time
+    from collections import defaultdict
 
     cluster_label = cluster or "default"
+
+    # Aggregate per-namespace OOM count and estimated cost from pod rows
+    ns_oom: Dict[str, int] = defaultdict(int)
+    ns_cost: Dict[str, float] = defaultdict(float)
+    for r in rows:
+        ns = r.get("namespace", "")
+        if not ns:
+            continue
+        oom_val = int(r.get("oom_killed") or 0)
+        if oom_val > 0:
+            ns_oom[ns] += oom_val
+        cost = r.get("est_monthly_cost_usd")
+        if cost != "":
+            try:
+                ns_cost[ns] += float(cost or 0)
+            except (TypeError, ValueError):
+                pass
+
     lines = [
         "# HELP pod_scanner_last_scan_timestamp_seconds Unix timestamp of the last successful scan",
         "# TYPE pod_scanner_last_scan_timestamp_seconds gauge",
@@ -1508,6 +1528,30 @@ def write_prometheus_metrics(
             f'pod_scanner_recommendations_total{{type="{rtype}",cluster="{cluster_label}"}}'
             f' {count}'
         )
+    # Namespace OOM killed total (derived from pod rows)
+    if ns_oom:
+        lines += [
+            "",
+            "# HELP pod_scanner_namespace_oom_killed_total OOM-killed container count per namespace",
+            "# TYPE pod_scanner_namespace_oom_killed_total gauge",
+        ]
+        for ns, count in sorted(ns_oom.items()):
+            lines.append(
+                f'pod_scanner_namespace_oom_killed_total{{namespace="{ns}",cluster="{cluster_label}"}}'
+                f' {count}'
+            )
+    # Namespace estimated monthly cost (derived from pod rows)
+    if ns_cost:
+        lines += [
+            "",
+            "# HELP pod_scanner_namespace_est_monthly_cost_usd Estimated monthly cost per namespace (USD)",
+            "# TYPE pod_scanner_namespace_est_monthly_cost_usd gauge",
+        ]
+        for ns, cost in sorted(ns_cost.items()):
+            lines.append(
+                f'pod_scanner_namespace_est_monthly_cost_usd{{namespace="{ns}",cluster="{cluster_label}"}}'
+                f' {round(cost, 4)}'
+            )
     lines.append("")  # trailing newline
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1656,7 +1700,7 @@ def main() -> None:
             write_csv(rows, summary, node_rows, node_util, recommendations, output_dir, run_ts)
             write_resource_quotas_csv(quota_rows, output_dir, run_ts)
             write_last_success(output_dir, run_ts, cluster_name or "default")
-            write_prometheus_metrics(output_dir, run_ts, cluster_name, summary, node_util, recommendations)
+            write_prometheus_metrics(output_dir, run_ts, cluster_name, summary, node_util, recommendations, rows)
             cleanup_old_snapshots(output_dir, retention_days)
 
             if update_sheet:
