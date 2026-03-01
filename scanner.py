@@ -133,8 +133,11 @@ def get_workload_info(apps_v1: client.AppsV1Api, pod) -> tuple:
                         ref.name, pod.metadata.namespace
                     )
                     replicas = str(ds.status.number_ready or 0) + " (DS)"
-            except ApiException:
-                pass
+            except ApiException as e:
+                LOG.debug(
+                    "Could not fetch workload info for %s/%s (%s): %s",
+                    pod.metadata.namespace, ref.name, kind, e,
+                )
             break
     return (kind, name, replicas)
 
@@ -171,8 +174,8 @@ def scan(
                 if (cs.last_state and cs.last_state.terminated
                         and cs.last_state.terminated.reason == "OOMKilled"):
                     oom_set.add(cs.name)
-            except AttributeError:
-                pass
+            except AttributeError as e:
+                LOG.debug("Skipping OOM state check for container status: %s", e)
 
         hpa_managed = 1 if (ns, kind, workload_name) in hpa_targets else 0
 
@@ -958,7 +961,7 @@ def update_google_sheet(
         sh.del_worksheet(sh.worksheet("All Resources"))
         LOG.info("Removed obsolete 'All Resources' tab from sheet")
     except gspread.WorksheetNotFound:
-        pass
+        LOG.debug("'All Resources' tab not found; nothing to remove")
 
     _update_dashboard_sheet(sh, summary, node_util, recommendations, run_ts, formatted, combined, quota_rows=quota_rows)
 
@@ -985,7 +988,8 @@ def _dashboard_get_existing_chart_ids(sh, dashboard_sheet_id: int) -> List[int]:
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
-    except Exception:
+    except Exception as e:
+        LOG.debug("Could not fetch existing chart IDs from Sheets API: %s", e)
         return []
     chart_ids: List[int] = []
     for sheet in data.get("sheets", []):
@@ -1233,7 +1237,7 @@ def _update_dashboard_sheet(
     # --- Dashboard tab: title, KPI cards, Top 10, historical comparison, and charts ---
     try:
         dash_ws = sh.worksheet("Dashboard")
-    except Exception:
+    except gspread.WorksheetNotFound:
         dash_ws = sh.add_worksheet("Dashboard", rows=25, cols=14)
     dashboard_sheet_id = dash_ws.id
 
@@ -1423,8 +1427,8 @@ def write_prometheus_metrics(
         if cost != "":
             try:
                 ns_cost[ns] += float(cost or 0)
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as e:
+                LOG.debug("Skipping non-numeric cost value for namespace %s: %s", ns, e)
 
     lines = [
         "# HELP pod_scanner_last_scan_timestamp_seconds Unix timestamp of the last successful scan",

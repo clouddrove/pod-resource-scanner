@@ -1,0 +1,29 @@
+version: 2
+updates:
+  # Python dependencies (requirements.txt / requirements.lock)
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
+    open-pull-requests-limit: 5
+
+  # Dockerfile base image
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
+
+  # GitHub Actions workflow steps
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
