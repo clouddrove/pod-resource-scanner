@@ -52,7 +52,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           helm package ./chart --version "$VERSION" --app-version "$VERSION"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: helm-chart
           path: "*.tgz"
