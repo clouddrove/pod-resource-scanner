@@ -33,8 +33,16 @@ A lightweight, **read-only** Kubernetes tool that runs as a CronJob on **AKS**, 
 - 🔒 **Read-only** — No cluster changes; lists pods, nodes, namespaces, workloads
 - 📁 **Single CSV** — One append-only file (`all-resources.csv`) with `scan_date` for long-term history
 - 👁️ **Human-readable** — Memory/CPU/disk in Mi, Gi, cores, and % (no raw bytes or millicores)
-- 💡 **Recommendations** — Suggests scale up/down and limit changes (e.g. limit >> request)
+- 💡 **Recommendations** — Scale up/down, limit changes, OOM risk, and growth alerts
 - 📈 **Week-over-Week Comparison** — Tracks resource changes per namespace with growth alerts
+- 📊 **Actual Usage Metrics** — CPU/memory actual usage via metrics-server (optional, degrades gracefully)
+- 💀 **OOM Kill Detection** — Flags containers that were OOM-killed and emits `oom_risk` recommendations
+- 📋 **ResourceQuota Reporting** — Scans namespace quotas (hard vs used) into `resource-quotas.csv`
+- 🔄 **HPA Awareness** — Marks HPA-managed containers; annotates scale-down recs accordingly
+- 💰 **Cost Estimation** — Estimates monthly cost per container based on CPU/memory requests
+- 📡 **Prometheus Textfile Export** — Writes `pod-scanner.prom` for node_exporter scraping
+- 🚫 **Namespace Exclusion** — Skip specific namespaces (e.g. `kube-system,monitoring`)
+- 🧪 **Dry-Run Mode** — Full scan with no file writes; logs recommendations only
 - 📋 **Optional Google Sheet** — Same data appended to one sheet for dashboards and sharing
 - ⏰ **Helm + CronJob** — Deploy once; runs on a schedule (e.g. weekly)
 
@@ -57,19 +65,30 @@ A lightweight, **read-only** Kubernetes tool that runs as a CronJob on **AKS**, 
 | Area | Data |
 |------|------|
 | **Pods / Containers** | Namespace, pod, container, node, workload kind/name, replicas, CPU/memory/ephemeral-storage request & limit, status |
+| **Actual Usage** | Per-container CPU/memory actual usage from metrics-server (`cpu_usage`, `memory_usage`) — optional |
+| **OOM Kills** | Whether each container was OOM-killed in its last termination (`oom_killed` 0/1) |
+| **HPA** | Whether each container's workload is managed by an HPA (`hpa_managed` 0/1) |
+| **Cost** | Estimated monthly cost per container based on CPU/memory requests (`est_monthly_cost_usd`) |
 | **Nodes** | Per-node CPU, memory, and disk (ephemeral-storage) capacity and allocatable |
+| **Node Usage** | Actual CPU/memory usage per node from metrics-server (when available) |
 | **Utilization** | Requested vs allocatable per node (CPU, memory, disk %) |
 | **Namespace** | Pod count, container count, CPU/memory requested per namespace |
+| **ResourceQuotas** | Hard and used values for CPU, memory, and pod count per namespace |
 | **Week-over-Week** | CPU/memory/pod count changes vs previous scan with % growth |
-| **Recommendations** | Scale up (add nodes), scale down (consolidate), change limits (set or lower limits), growth alerts (>20% increase) |
+| **Recommendations** | Scale up/down nodes, change limits (set or lower), OOM risk, growth alerts |
 
 ---
 
 ## 📊 Output
 
-- 📄 **CSV (always)** — Single file: **`all-resources.csv`**. Each run **appends** rows with a **scan_date** column. Raw column names (e.g. `cpu_request`, `memory_limit`, `node_cpu_util_pct`) and values (e.g. `100m`, `128Mi`, `38.9`) for easy parsing and tools.
+| File | Description |
+|------|-------------|
+| `all-resources.csv` | Single append-only file; each run adds rows with `scan_date`. Contains pod/container/node/namespace data, usage, OOM, HPA, cost, and recommendations. |
+| `resource-quotas.csv` | Append-only; namespace ResourceQuota hard and used values per run. |
+| `pod-scanner.prom` | Prometheus textfile format for node_exporter scraping. Includes namespace CPU/memory requested, node utilization %, usage % (if metrics-server available), and recommendation counts. |
+| `last_success.txt` | Timestamp and cluster name of the last successful scan (for monitoring). |
 
-- 📋 **Google Sheet (optional)** — **One new tab per run** (historical data) + **Dashboard:** Each run creates **"Run &lt;timestamp&gt;"** with that run’s summary tables; only the last **N** run tabs are kept (configurable). **Dashboard** shows KPIs for the latest run; open any **Run &lt;timestamp&gt;** tab for full details and history.
+- 📋 **Google Sheet (optional)** — **One new tab per run** (historical data) + **Dashboard:** Each run creates **"Run &lt;timestamp&gt;"** with summary tables (namespace, node utilization, recommendations, and 13-column container details including usage, OOM, HPA, and cost); only the last **N** run tabs are kept (configurable). **Dashboard** shows KPIs including total estimated monthly cost.
 
 ---
 
@@ -140,9 +159,14 @@ See **Configuration** and `chart/values.yaml` for all options.
 |----------------------|-------------|--------|
 | `POD_SCANNER_OUTPUT_DIR` | Directory for CSV output | `/output` |
 | `POD_SCANNER_CLUSTER_NAME` | Cluster identifier (for multi-cluster CSV/Sheet) | (empty) |
+| `POD_SCANNER_EXCLUDE_NAMESPACES` | Comma-separated namespaces to skip (e.g. `kube-system,monitoring`) | (empty) |
+| `POD_SCANNER_DRY_RUN` | `true`/`1` — scan fully but write no files | `false` |
+| `POD_SCANNER_METRICS_ENABLED` | `false` to skip metrics-server calls | `true` |
+| `POD_SCANNER_COST_CPU_CORE_HOUR` | Estimated cost per CPU core per hour (USD) | `0.048` |
+| `POD_SCANNER_COST_MEM_GB_HOUR` | Estimated cost per GiB memory per hour (USD) | `0.006` |
 | `POD_SCANNER_UPDATE_GOOGLE_SHEET` | Set to `true`/`1` to update Google Sheet | unset |
 | `POD_SCANNER_SHEET_ID` | Google Sheet ID (or use secret) | - |
-| `POD_SCANNER_SHEET_RUN_TABS_KEEP` | Number of **Run &lt;timestamp&gt;** tabs to keep (older ones deleted); use for historical data | `10` |
+| `POD_SCANNER_SHEET_RUN_TABS_KEEP` | Number of **Run &lt;timestamp&gt;** tabs to keep | `10` |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON | - |
 | `POD_SCANNER_UTIL_SCALE_UP_PCT` | Utilization % above which to recommend scale up | `75` |
 | `POD_SCANNER_UTIL_SCALE_DOWN_PCT` | Utilization % below which to recommend scale down | `25` |
@@ -150,7 +174,7 @@ See **Configuration** and `chart/values.yaml` for all options.
 | `POD_SCANNER_RETENTION_DAYS` | Delete snapshot CSVs older than N days (`0` = keep all) | `0` |
 | `POD_SCANNER_LOG_LEVEL` | Logging level | `INFO` |
 
-RBAC: the chart creates a **ClusterRole** and **ClusterRoleBinding** (read-only) so the scanner can list nodes, namespaces, pods, and workloads.
+RBAC: the chart creates a **ClusterRole** and **ClusterRoleBinding** (read-only) for pods, nodes, namespaces, workloads, resourcequotas, horizontalpodautoscalers, and metrics.k8s.io (for metrics-server).
 
 ---
 
