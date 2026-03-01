@@ -25,6 +25,8 @@ import kubernetes  # noqa: E402
 kubernetes.client = _stub("kubernetes.client")
 kubernetes.client.CoreV1Api = MagicMock()
 kubernetes.client.AppsV1Api = MagicMock()
+kubernetes.client.CustomObjectsApi = MagicMock()
+kubernetes.client.AutoscalingV2Api = MagicMock()
 kubernetes.client.rest = _stub("kubernetes.client.rest")
 kubernetes.client.rest.ApiException = Exception
 kubernetes.config = _stub("kubernetes.config")
@@ -39,6 +41,11 @@ from scanner import (
     node_utilization,
     node_requested_totals,
     read_previous_scan,
+    get_pod_metrics,
+    get_hpa_targets,
+    enrich_with_cost,
+    write_prometheus_metrics,
+    scan,
 )
 
 
@@ -312,3 +319,369 @@ class TestReadPreviousScan:
         # Should log a warning and return {} rather than crashing
         result = read_previous_scan(tmp_path)
         assert isinstance(result, dict)
+
+
+# ---------------------------------------------------------------------------
+# get_pod_metrics
+# ---------------------------------------------------------------------------
+
+class TestGetPodMetrics:
+    def test_returns_dict_on_success(self):
+        mock_api = MagicMock()
+        mock_api.list_cluster_custom_object.return_value = {
+            "items": [
+                {
+                    "metadata": {"namespace": "default", "name": "web-1"},
+                    "containers": [
+                        {"name": "nginx", "usage": {"cpu": "125m", "memory": "256Mi"}},
+                    ],
+                }
+            ]
+        }
+        result = get_pod_metrics(mock_api)
+        assert result == {"default/web-1/nginx": {"cpu_usage": "125m", "memory_usage": "256Mi"}}
+
+    def test_returns_empty_when_api_raises(self):
+        mock_api = MagicMock()
+        mock_api.list_cluster_custom_object.side_effect = RuntimeError("metrics-server unavailable")
+        result = get_pod_metrics(mock_api)
+        assert result == {}
+
+    def test_returns_empty_on_empty_items(self):
+        mock_api = MagicMock()
+        mock_api.list_cluster_custom_object.return_value = {"items": []}
+        result = get_pod_metrics(mock_api)
+        assert result == {}
+
+    def test_multiple_containers(self):
+        mock_api = MagicMock()
+        mock_api.list_cluster_custom_object.return_value = {
+            "items": [
+                {
+                    "metadata": {"namespace": "prod", "name": "app-abc"},
+                    "containers": [
+                        {"name": "app", "usage": {"cpu": "200m", "memory": "512Mi"}},
+                        {"name": "sidecar", "usage": {"cpu": "10m", "memory": "32Mi"}},
+                    ],
+                }
+            ]
+        }
+        result = get_pod_metrics(mock_api)
+        assert "prod/app-abc/app" in result
+        assert "prod/app-abc/sidecar" in result
+        assert result["prod/app-abc/sidecar"]["cpu_usage"] == "10m"
+
+
+# ---------------------------------------------------------------------------
+# OOM detection in scan()
+# ---------------------------------------------------------------------------
+
+def _make_container(name, cpu_req="100m", mem_req="128Mi"):
+    """Build a minimal fake container object."""
+    c = MagicMock()
+    c.name = name
+    c.resources.requests = {"cpu": cpu_req, "memory": mem_req}
+    c.resources.limits = {}
+    return c
+
+
+def _make_pod(ns, name, containers, oom_containers=None, node="node1"):
+    """Build a minimal fake pod object."""
+    pod = MagicMock()
+    pod.metadata.namespace = ns
+    pod.metadata.name = name
+    pod.metadata.owner_references = []
+    pod.spec.node_name = node
+    pod.spec.containers = containers
+    pod.status.phase = "Running"
+
+    # Build container_statuses for OOM detection
+    cs_list = []
+    for c in containers:
+        cs = MagicMock()
+        cs.name = c.name
+        if oom_containers and c.name in oom_containers:
+            cs.last_state.terminated.reason = "OOMKilled"
+        else:
+            cs.last_state = None
+        cs_list.append(cs)
+    pod.status.container_statuses = cs_list
+    return pod
+
+
+class TestOomDetection:
+    def test_oom_killed_container_flagged(self):
+        containers = [_make_container("nginx")]
+        pod = _make_pod("default", "web-1", containers, oom_containers={"nginx"})
+
+        mock_v1 = MagicMock()
+        mock_v1.list_pod_for_all_namespaces.return_value.items = [pod]
+        mock_apps = MagicMock()
+        mock_apps.read_namespaced_replica_set.side_effect = Exception("no rs")
+
+        rows = scan(mock_v1, mock_apps)
+        assert rows[0]["oom_killed"] == 1
+
+    def test_normal_container_not_flagged(self):
+        containers = [_make_container("nginx")]
+        pod = _make_pod("default", "web-1", containers)
+
+        mock_v1 = MagicMock()
+        mock_v1.list_pod_for_all_namespaces.return_value.items = [pod]
+        mock_apps = MagicMock()
+
+        rows = scan(mock_v1, mock_apps)
+        assert rows[0]["oom_killed"] == 0
+
+    def test_mixed_containers_selective_oom(self):
+        containers = [_make_container("app"), _make_container("sidecar")]
+        pod = _make_pod("default", "web-1", containers, oom_containers={"app"})
+
+        mock_v1 = MagicMock()
+        mock_v1.list_pod_for_all_namespaces.return_value.items = [pod]
+        mock_apps = MagicMock()
+
+        rows = scan(mock_v1, mock_apps)
+        by_cont = {r["container"]: r for r in rows}
+        assert by_cont["app"]["oom_killed"] == 1
+        assert by_cont["sidecar"]["oom_killed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# get_hpa_targets
+# ---------------------------------------------------------------------------
+
+class TestGetHpaTargets:
+    def test_returns_frozenset_of_tuples(self):
+        mock_api = MagicMock()
+        hpa1 = MagicMock()
+        hpa1.metadata.namespace = "default"
+        hpa1.spec.scale_target_ref.kind = "Deployment"
+        hpa1.spec.scale_target_ref.name = "web"
+        mock_api.list_horizontal_pod_autoscaler_for_all_namespaces.return_value.items = [hpa1]
+
+        result = get_hpa_targets(mock_api)
+        assert isinstance(result, frozenset)
+        assert ("default", "Deployment", "web") in result
+
+    def test_returns_empty_frozenset_on_error(self):
+        mock_api = MagicMock()
+        mock_api.list_horizontal_pod_autoscaler_for_all_namespaces.side_effect = RuntimeError("no HPA")
+        result = get_hpa_targets(mock_api)
+        assert result == frozenset()
+
+    def test_multiple_hpas(self):
+        mock_api = MagicMock()
+        items = []
+        for ns, kind, name in [("default", "Deployment", "web"), ("prod", "StatefulSet", "db")]:
+            h = MagicMock()
+            h.metadata.namespace = ns
+            h.spec.scale_target_ref.kind = kind
+            h.spec.scale_target_ref.name = name
+            items.append(h)
+        mock_api.list_horizontal_pod_autoscaler_for_all_namespaces.return_value.items = items
+
+        result = get_hpa_targets(mock_api)
+        assert ("default", "Deployment", "web") in result
+        assert ("prod", "StatefulSet", "db") in result
+
+
+# ---------------------------------------------------------------------------
+# enrich_with_cost
+# ---------------------------------------------------------------------------
+
+class TestEnrichWithCost:
+    def test_zero_requests_gives_empty_string(self):
+        rows = [{"cpu_request": "", "memory_request": ""}]
+        enrich_with_cost(rows)
+        assert rows[0]["est_monthly_cost_usd"] == ""
+
+    def test_nonzero_requests_gives_float(self):
+        rows = [{"cpu_request": "1000m", "memory_request": "1Gi"}]
+        enrich_with_cost(rows, cost_cpu_core_hour=0.048, cost_mem_gb_hour=0.006)
+        cost = rows[0]["est_monthly_cost_usd"]
+        assert isinstance(cost, float)
+        assert cost > 0
+
+    def test_formula_correctness(self):
+        # 1 core CPU + 1 GiB memory @ default rates * 730 hours
+        rows = [{"cpu_request": "1000m", "memory_request": "1Gi"}]
+        enrich_with_cost(rows, cost_cpu_core_hour=0.048, cost_mem_gb_hour=0.006)
+        expected = round((1.0 * 0.048 + 1.0 * 0.006) * 730, 4)
+        assert rows[0]["est_monthly_cost_usd"] == expected
+
+    def test_cpu_only_request(self):
+        rows = [{"cpu_request": "500m", "memory_request": ""}]
+        enrich_with_cost(rows, cost_cpu_core_hour=0.1, cost_mem_gb_hour=0.0)
+        expected = round(0.5 * 0.1 * 730, 4)
+        assert rows[0]["est_monthly_cost_usd"] == expected
+
+    def test_mutates_in_place(self):
+        rows = [{"cpu_request": "100m", "memory_request": "128Mi"}]
+        result = enrich_with_cost(rows)
+        assert result is None  # returns None (in-place mutation)
+        assert "est_monthly_cost_usd" in rows[0]
+
+
+# ---------------------------------------------------------------------------
+# write_prometheus_metrics
+# ---------------------------------------------------------------------------
+
+class TestWritePrometheusMetrics:
+    def _run(self, tmp_path, summary=None, node_util=None, recommendations=None):
+        write_prometheus_metrics(
+            tmp_path,
+            "2026-02-28T120000Z",
+            "test-cluster",
+            summary or [],
+            node_util or [],
+            recommendations or [],
+        )
+        return (tmp_path / "pod-scanner.prom").read_text(encoding="utf-8")
+
+    def test_file_created(self, tmp_path):
+        content = self._run(tmp_path)
+        assert (tmp_path / "pod-scanner.prom").exists()
+        assert "pod_scanner_last_scan_timestamp_seconds" in content
+
+    def test_cluster_label_present(self, tmp_path):
+        content = self._run(tmp_path)
+        assert 'cluster="test-cluster"' in content
+
+    def test_namespace_metrics(self, tmp_path):
+        summary = [{"namespace": "default", "cpu_requested_millicores": 250,
+                    "memory_requested_bytes": 256 * 1024**2, "cpu_change_pct": 10.0}]
+        content = self._run(tmp_path, summary=summary)
+        assert 'namespace="default"' in content
+        assert "pod_scanner_namespace_cpu_requested_millicores" in content
+
+    def test_node_metrics(self, tmp_path):
+        node_util = [{
+            "node": "node1", "cpu_util_pct": 45.0, "memory_util_pct": 60.0,
+            "cpu_usage_pct": "", "memory_usage_pct": "",
+        }]
+        content = self._run(tmp_path, node_util=node_util)
+        assert 'node="node1"' in content
+        assert "pod_scanner_node_cpu_util_pct" in content
+
+    def test_usage_metrics_only_when_available(self, tmp_path):
+        # No usage data → no usage metrics
+        node_util = [{"node": "n1", "cpu_util_pct": 50, "memory_util_pct": 50,
+                      "cpu_usage_pct": "", "memory_usage_pct": ""}]
+        content = self._run(tmp_path, node_util=node_util)
+        assert "pod_scanner_node_cpu_usage_pct" not in content
+
+        # With usage data → usage metrics emitted
+        node_util_with_usage = [{"node": "n1", "cpu_util_pct": 50, "memory_util_pct": 50,
+                                  "cpu_usage_pct": 30.0, "memory_usage_pct": 40.0}]
+        content2 = self._run(tmp_path, node_util=node_util_with_usage)
+        assert "pod_scanner_node_cpu_usage_pct" in content2
+
+    def test_recommendation_counts(self, tmp_path):
+        recs = [
+            {"type": "scale_down", "target": "node:n1", "reason": "low", "action": "remove"},
+            {"type": "change_limits", "target": "ns/pod/c", "reason": "no limits", "action": "set"},
+            {"type": "change_limits", "target": "ns/pod/c2", "reason": "4x", "action": "lower"},
+        ]
+        content = self._run(tmp_path, recommendations=recs)
+        assert "pod_scanner_recommendations_total" in content
+        assert 'type="scale_down"' in content
+        assert 'type="change_limits"' in content
+
+    def test_unscheduled_node_skipped(self, tmp_path):
+        node_util = [{"node": "_unscheduled_", "cpu_util_pct": 99, "memory_util_pct": 99,
+                      "cpu_usage_pct": "", "memory_usage_pct": ""}]
+        content = self._run(tmp_path, node_util=node_util)
+        assert "_unscheduled_" not in content
+
+
+# ---------------------------------------------------------------------------
+# OOM recommendations in build_recommendations
+# ---------------------------------------------------------------------------
+
+class TestBuildRecommendationsOom:
+    def test_oom_killed_container_generates_oom_risk_rec(self):
+        pod_rows = [{
+            "namespace": "default", "pod": "web-1", "container": "nginx",
+            "cpu_request": "100m", "cpu_limit": "200m",
+            "memory_request": "128Mi", "memory_limit": "128Mi",
+            "oom_killed": 1,
+            "node": "node1", "workload_kind": "Deployment", "workload_name": "web",
+        }]
+        recs = build_recommendations([], pod_rows, [])
+        types = [r["type"] for r in recs]
+        assert "oom_risk" in types
+
+    def test_non_oom_container_no_oom_risk_rec(self):
+        pod_rows = [{
+            "namespace": "default", "pod": "web-1", "container": "nginx",
+            "cpu_request": "100m", "cpu_limit": "200m",
+            "memory_request": "128Mi", "memory_limit": "128Mi",
+            "oom_killed": 0,
+            "node": "node1", "workload_kind": "Deployment", "workload_name": "web",
+        }]
+        recs = build_recommendations([], pod_rows, [])
+        types = [r["type"] for r in recs]
+        assert "oom_risk" not in types
+
+    def test_hpa_annotation_on_scale_down(self):
+        node_util = [_make_node_util(cpu_pct=10, mem_pct=10, node="node1")]
+        pod_rows = [{
+            "namespace": "default", "pod": "web-1", "container": "nginx",
+            "cpu_request": "100m", "cpu_limit": "200m",
+            "memory_request": "128Mi", "memory_limit": "128Mi",
+            "oom_killed": 0,
+            "node": "node1", "workload_kind": "Deployment", "workload_name": "web",
+        }]
+        hpa_targets = frozenset({("default", "Deployment", "web")})
+        recs = build_recommendations(node_util, pod_rows, [], util_scale_down_pct=25, hpa_targets=hpa_targets)
+        scale_down = [r for r in recs if r["type"] == "scale_down" and "node:" in r.get("target", "")]
+        assert scale_down, "Expected scale_down recommendation"
+        assert "HPA-managed" in scale_down[0]["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Namespace exclusion in scan()
+# ---------------------------------------------------------------------------
+
+class TestNamespaceExclusion:
+    def test_excluded_namespace_not_in_output(self):
+        containers = [_make_container("nginx")]
+        pod_default = _make_pod("default", "web-1", containers)
+        pod_kube = _make_pod("kube-system", "dns-1", [_make_container("coredns")])
+
+        mock_v1 = MagicMock()
+        mock_v1.list_pod_for_all_namespaces.return_value.items = [pod_default, pod_kube]
+        mock_apps = MagicMock()
+
+        rows = scan(mock_v1, mock_apps, exclude_namespaces=frozenset({"kube-system"}))
+        namespaces = {r["namespace"] for r in rows}
+        assert "default" in namespaces
+        assert "kube-system" not in namespaces
+
+    def test_no_exclusion_includes_all(self):
+        containers = [_make_container("nginx")]
+        pod_default = _make_pod("default", "web-1", containers)
+        pod_kube = _make_pod("kube-system", "dns-1", [_make_container("coredns")])
+
+        mock_v1 = MagicMock()
+        mock_v1.list_pod_for_all_namespaces.return_value.items = [pod_default, pod_kube]
+        mock_apps = MagicMock()
+
+        rows = scan(mock_v1, mock_apps)
+        namespaces = {r["namespace"] for r in rows}
+        assert "default" in namespaces
+        assert "kube-system" in namespaces
+
+    def test_exclude_multiple_namespaces(self):
+        mock_v1 = MagicMock()
+        mock_v1.list_pod_for_all_namespaces.return_value.items = [
+            _make_pod("default", "w", [_make_container("c")]),
+            _make_pod("monitoring", "p", [_make_container("c")]),
+            _make_pod("prod", "a", [_make_container("c")]),
+        ]
+        mock_apps = MagicMock()
+
+        rows = scan(mock_v1, mock_apps, exclude_namespaces=frozenset({"monitoring", "default"}))
+        namespaces = {r["namespace"] for r in rows}
+        assert namespaces == {"prod"}

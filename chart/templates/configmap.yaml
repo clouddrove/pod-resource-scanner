@@ -13,3 +13,8 @@ data:
   POD_SCANNER_RETENTION_DAYS: {{ .Values.config.retentionDays | quote }}
   POD_SCANNER_SHEET_RUN_TABS_KEEP: {{ .Values.config.runTabsKeep | default "10" | quote }}
   POD_SCANNER_GROWTH_ALERT_PCT: {{ .Values.config.growthAlertPct | default "20" | quote }}
+  POD_SCANNER_EXCLUDE_NAMESPACES: {{ .Values.config.excludeNamespaces | default "" | quote }}
+  POD_SCANNER_DRY_RUN: {{ .Values.config.dryRun | default "false" | quote }}
+  POD_SCANNER_METRICS_ENABLED: {{ .Values.config.metricsEnabled | default "true" | quote }}
+  POD_SCANNER_COST_CPU_CORE_HOUR: {{ .Values.config.costCpuCoreHour | default "0.048" | quote }}
+  POD_SCANNER_COST_MEM_GB_HOUR: {{ .Values.config.costMemGbHour | default "0.006" | quote }}

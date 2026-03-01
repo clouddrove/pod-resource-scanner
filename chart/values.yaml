@@ -85,6 +85,16 @@ config:
   runTabsKeep: "10"
   # -- Namespace resource growth % (week-over-week) above which to emit a growth_alert recommendation
   growthAlertPct: "20"
+  # -- Comma-separated list of namespaces to exclude from scanning (e.g. "kube-system,monitoring")
+  excludeNamespaces: ""
+  # -- Set to "true" to run a scan without writing any output files or updating Google Sheets
+  dryRun: "false"
+  # -- Set to "false" to disable metrics-server usage collection (degrades gracefully if unset)
+  metricsEnabled: "true"
+  # -- Estimated cost per CPU core per hour (USD) for monthly cost estimation
+  costCpuCoreHour: "0.048"
+  # -- Estimated cost per GiB of memory per hour (USD) for monthly cost estimation
+  costMemGbHour: "0.006"
 
 # -- Google Sheet integration (optional)
 googleSheet:
