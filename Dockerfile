@@ -1,6 +1,6 @@
 # Pin to a specific patch release + distro for reproducible builds.
 # Update this tag (and re-run pip-compile) when you need OS/Python security patches.
-FROM python:3.11.11-slim-bookworm
+FROM python:3.14.3-slim-bookworm
 
 # Run as non-root (UID 1000) so pod securityContext runAsUser/fsGroup match
 RUN adduser --disabled-password --gecos "" --uid 1000 appuser
