@@ -1,4 +1,4 @@
 kubernetes>=35.0.0
 gspread>=6.2.1
-google-auth>=2.53.0
+google-auth>=2.55.2
 google-auth-oauthlib>=1.4.0
